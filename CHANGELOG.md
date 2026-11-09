@@ -2,6 +2,8 @@
 
 ## 0.12.0 - 2026-11-09
 
+- 发布整理：项目代号泛化为占位符；模板改为通用命名（`spec-4k-wifi` / `spec-dual-wifi` 等）；新增 README / install.sh；install.sh 快速开始文案改为内存评估。
+
 - 「NPU + 算法」从功能开关里拆成独立一步（池 / 算法模型多选 / 是否含 CMA）。
 - 问卷按两本账重组：第 1 块 RMEM（逐路 sensor）；第 2 块 Linux 分 2a OS 层（含驱动）与 2b 应用层（MIKE/MIIO/语控/MTP/网络）；NAS/SD 归应用层功能开关。
 - 报告口径与问卷对齐：块 1 RMEM / 块 2 OS 层 + 应用层 / 块 3 算法。
