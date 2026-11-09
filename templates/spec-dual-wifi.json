@@ -1,0 +1,217 @@
+{
+  "_notes": [
+    "加 slab 行后五项 115.59（旧 111.65 与实测 111.66 吻合为加 slab 前）；slab 是否与旧拟合基线双算待 A/B",
+    "<项目C> 双摄 WiFi；128MB DDR；bootargs mem=85M/rmem=43M；isp_memopt=8, ivdc_mem_line=810",
+    "2026-11-09 实机 continuous_mem_info 重标：rmem used 42,776,320 / cap 45,088,768",
+    "k_isp=0.7275, k_recon=0.8559, k_stream=1.4331；SDK 预留 4,657,792B（含 JPEG 额外块）",
+    "fixed 按 MemTotal 81,488K / MemFree 14,480K / Cached 21,092K / Slab 5,096K / Buffers 6,932K 校准",
+    "app_base 6,635,520B（c_mi_ipc anon 16,972K − 动态 10,743,808B）；miio_client 1,773,568B",
+    "B01 在此基础上 +1 路 480P H264 + 海外语控 SDK，另行预测",
+    "算法为【常电】人/车算法（algo-normal-power-pv，1229KB），已含在 NPU 池 5120KB 内，algo_model_kb 保持 0，勿再单列"
+  ],
+  "project": "<项目C>",
+  "platform": "T32Pro",
+  "network": {
+    "type": "wifi",
+    "wifi_supplicant_kb": 0,
+    "lte_supplicant_kb": 0,
+    "lte_module_kb": 0
+  },
+  "dram_mb": 128,
+  "rmem_bootargs_mb": 43,
+  "buffer_seconds": 8,
+  "p2p": {
+    "clients": 3,
+    "video_kb": 1536,
+    "video_bufs": 1,
+    "audio_kb": 32,
+    "audio_bufs": 2
+  },
+  "ivdc_mem_line": 810,
+  "coefficients": {
+    "pool_a": 0.957336,
+    "pool_b": 95958,
+    "k_isp": 0.7275,
+    "k_recon": 0.8559,
+    "k_stream": 1.4331,
+    "maxi_factor": 2.5,
+    "k_jpeg": 1.0,
+    "jpeg_overhead": 8320,
+    "h264_factor": 1.22
+  },
+  "audio": {
+    "bitrate": 150,
+    "channels": 1
+  },
+  "sdk_reserved": 4657792,
+  "frame_sources": [
+    {
+      "enabled": true,
+      "sensor": 0,
+      "name": "FS0 主码流",
+      "w": 2880,
+      "h": 1620,
+      "nrvbs": 1,
+      "ivdc": true
+    },
+    {
+      "enabled": true,
+      "sensor": 0,
+      "name": "FS1 次码流",
+      "w": 832,
+      "h": 480,
+      "nrvbs": 2,
+      "ivdc": false
+    },
+    {
+      "enabled": true,
+      "sensor": 0,
+      "name": "FS2 抓拍/H264",
+      "w": 832,
+      "h": 480,
+      "nrvbs": 2,
+      "ivdc": false
+    },
+    {
+      "enabled": true,
+      "sensor": 1,
+      "name": "FS3 主码流",
+      "w": 2880,
+      "h": 1620,
+      "nrvbs": 1,
+      "ivdc": true
+    },
+    {
+      "enabled": true,
+      "sensor": 1,
+      "name": "FS4 次码流",
+      "w": 832,
+      "h": 480,
+      "nrvbs": 2,
+      "ivdc": false
+    },
+    {
+      "enabled": true,
+      "sensor": 1,
+      "name": "FS5 抓拍/H264",
+      "w": 832,
+      "h": 480,
+      "nrvbs": 2,
+      "ivdc": false
+    }
+  ],
+  "encoders": [
+    {
+      "enabled": true,
+      "sensor": 0,
+      "name": "enc0 S0 主码流",
+      "type": "H265",
+      "w": 2880,
+      "h": 1620,
+      "bitrate": 1800,
+      "ring": true,
+      "ring_bitrate": 2000
+    },
+    {
+      "enabled": true,
+      "sensor": 0,
+      "name": "enc1 S0 次码流",
+      "type": "H265",
+      "w": 832,
+      "h": 480,
+      "bitrate": 350,
+      "ring": true,
+      "ring_bitrate": 700
+    },
+    {
+      "enabled": false,
+      "sensor": 0,
+      "name": "enc2 S0 H264（海外版）",
+      "type": "H264",
+      "w": 832,
+      "h": 480,
+      "bitrate": 350,
+      "ring": false,
+      "ring_bitrate": 0
+    },
+    {
+      "enabled": true,
+      "sensor": 1,
+      "name": "enc3 S1 主码流",
+      "type": "H265",
+      "w": 2880,
+      "h": 1620,
+      "bitrate": 1800,
+      "ring": true,
+      "ring_bitrate": 2000
+    },
+    {
+      "enabled": true,
+      "sensor": 1,
+      "name": "enc4 S1 次码流",
+      "type": "H265",
+      "w": 832,
+      "h": 480,
+      "bitrate": 350,
+      "ring": true,
+      "ring_bitrate": 700
+    },
+    {
+      "enabled": false,
+      "sensor": 1,
+      "name": "enc5 S1 H264（海外版）",
+      "type": "H264",
+      "w": 832,
+      "h": 480,
+      "bitrate": 350,
+      "ring": false,
+      "ring_bitrate": 0
+    },
+    {
+      "enabled": true,
+      "sensor": 0,
+      "name": "enc6 S0 JPEG",
+      "type": "JPEG",
+      "w": 832,
+      "h": 480,
+      "bitrate": 0,
+      "ring": false
+    },
+    {
+      "enabled": true,
+      "sensor": 1,
+      "name": "enc7 S1 JPEG",
+      "type": "JPEG",
+      "w": 832,
+      "h": 480,
+      "bitrate": 0,
+      "ring": false
+    }
+  ],
+  "fixed": {
+    "kernel": 5685248,
+    "modules": 14360576,
+    "cma": 8388608,
+        "slab": 4071424,
+    "app_base": 6635520,
+    "miio_client": 1773568,
+    "miio_ot": 0,
+    "other_procs": 5115904,
+    "file_cache": 21598208,
+    "zram": 0
+  },
+  "features": {
+    "mtp": {
+      "enabled": false
+    },
+    "webrtc": {
+      "enabled": false
+    },
+    "npu_algo": {
+      "npu_pool_kb": 5120,
+      "algo_model_kb": 0,
+      "inside_cma": true
+    }
+  },
+  "calibrated": true
+}

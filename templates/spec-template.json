@@ -1,0 +1,128 @@
+{
+  "_notes": [
+    "海外语控 SDK 统称 WebRTC / Alexa / Google：用 features.webrtc 的 sessions/fixed/per_session 统一计；不再单列 voice_assistant",
+    "双摄/多摄：每项 frame_sources / encoders 加 sensor 字段（0/1/…）；<项目C> 直接用 templates/spec-dual-wifi.json",
+    "enabled / ivdc / ring 用 true/false；type 用 H265 / H264 / JPEG（JPEG 精确匹配才会走 JPEG 公式）",
+    "w/h 单位像素；bitrate(VENC) 与 ring_bitrate(SDK ring) 单位 kbps，ring_bitrate 省略时=bitrate；fixed / sdk_reserved 单位字节",
+    "JPEG 抓拍若按需建拆，enabled=false（稳态不计，瞬时约 +0.6MB）",
+    "frame_sources / encoders 数量不设上限（Excel 按 spec 动态生成行）",
+    "fixed 可整体省略，默认取 <项目A> 实测基线；换项目建议实测后覆盖",
+    "算法模型的 algo_model_kb 不用公式推：查 references/algo-models.md 登记表带入（常电人/车算法 1229KB）",
+    "WiFi 机型必须填 wifi_supplicant_kb：实测 wpa 1,608KB + udhcpc 468KB = 2,076KB（<参考机> 2026-11-09）；蓝牙开则 features.bluetooth.userspace_kb=868（miio_bt）"
+  ],
+  "project": "<项目A>",
+  "platform": "T32Pro",
+  "network": {
+    "type": "wifi",
+    "wifi_supplicant_kb": 2076,
+    "lte_supplicant_kb": 0,
+    "lte_module_kb": 0
+  },
+  "dram_mb": 64,
+  "rmem_bootargs_mb": 23.5,
+  "buffer_seconds": 6,
+  "p2p": {
+    "clients": 2,
+    "video_kb": 1024,
+    "video_bufs": 1,
+    "audio_kb": 32,
+    "audio_bufs": 2
+  },
+  "ivdc_mem_line": 200,
+  "coefficients": {
+    "pool_a": 0.799222,
+    "pool_b": 636370,
+    "k_isp": 0.7582,
+    "k_recon": 0.5875,
+    "k_stream": 6.978,
+    "maxi_factor": 2.5,
+    "k_jpeg": 1.0,
+    "jpeg_overhead": 8320,
+    "h264_factor": 1.22
+  },
+  "audio": {
+    "bitrate": 100,
+    "channels": 1
+  },
+  "sdk_reserved": 113152,
+  "frame_sources": [
+    {
+      "enabled": true,
+      "name": "FS0 主码流",
+      "w": 3840,
+      "h": 2160,
+      "nrvbs": 1,
+      "ivdc": true,
+      "sensor": 0
+    },
+    {
+      "enabled": true,
+      "name": "FS1 次码流/抓拍",
+      "w": 832,
+      "h": 480,
+      "nrvbs": 2,
+      "ivdc": false,
+      "sensor": 0
+    }
+  ],
+  "encoders": [
+    {
+      "enabled": true,
+      "name": "enc0 主码流",
+      "type": "H265",
+      "w": 3840,
+      "h": 2160,
+      "bitrate": 2000,
+      "ring": true,
+      "sensor": 0
+    },
+    {
+      "enabled": true,
+      "name": "enc1 次码流",
+      "type": "H265",
+      "w": 832,
+      "h": 480,
+      "bitrate": 350,
+      "ring": true,
+      "sensor": 0
+    },
+    {
+      "enabled": false,
+      "name": "enc2 JPEG 抓拍",
+      "type": "JPEG",
+      "w": 832,
+      "h": 480,
+      "bitrate": 0,
+      "ring": false,
+      "sensor": 0
+    }
+  ],
+  "fixed": {
+    "kernel": 6501171,
+    "modules": 1782579,
+    "cma": 4194304,
+        "slab": 4071424,
+    "app_base": 2097152,
+    "other_procs": 3565158,
+    "file_cache": 8283750,
+    "zram": 5242880
+  },
+  "features": {
+    "mtp": {
+      "enabled": false
+    },
+    "webrtc": {
+      "enabled": false
+    },
+    "bluetooth": {
+      "enabled": true,
+      "userspace_kb": 868
+    },
+    "npu_algo": {
+      "npu_pool_kb": 0,
+      "algo_model_kb": 0,
+      "inside_cma": true
+    }
+  },
+  "calibrated": false
+}

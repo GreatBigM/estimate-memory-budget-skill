@@ -1,0 +1,131 @@
+{
+  "_notes": [
+    "加 slab 行后五项 66.33、硬占用 58.43、硬余量 5.57（旧 62.45 为加 slab 前）",
+    "<项目A> WiFi 单摄 4K；64MB DDR；bootargs mem=41M/rmem=23.5MB；isp_memopt=0x7, ivdc_mem_line=200",
+    "本预测暂用 <项目B> 同平台实测系数（k_isp=0.7582, k_recon=0.5875, k_stream=6.978）；<项目A> 未实测，待上机重标",
+    "JPEG 按需建拆，稳态不计；MTP/海外语控不支持",
+    "NPU 按 CMA 4MB 上限估；算法模型按 references/algo-models.md：常电人/车算法 1229KB（实测 1.0MB+0.2MB），计入 algo_model_kb",
+    "miio_client 暂借 <项目B> 实测 1.63MiB；<项目A> 实测后替换",
+    "WiFi/BT 用户态实测（<参考机> 2026-11-09）：wpa_supplicant 1,608KB + udhcpc 468KB = 2,076KB（另一时段 992+432）；蓝牙 miio_bt 868KB；内核模块 WiFi 527,692B + BT 245,070B 均已含在 fixed.modules（9 模块合计 1,979,441B）"
+  ],
+  "project": "<项目A>",
+  "platform": "T32Pro",
+  "network": {
+    "type": "wifi",
+    "wifi_supplicant_kb": 2076,
+    "lte_supplicant_kb": 0,
+    "lte_module_kb": 0
+  },
+  "dram_mb": 64,
+  "rmem_bootargs_mb": 23.5,
+  "buffer_seconds": 6,
+  "p2p": {
+    "clients": 2,
+    "video_kb": 1024,
+    "video_bufs": 1,
+    "audio_kb": 32,
+    "audio_bufs": 2
+  },
+  "ivdc_mem_line": 200,
+  "coefficients": {
+    "pool_a": 0.799222,
+    "pool_b": 636370,
+    "k_isp": 0.7582,
+    "k_recon": 0.5875,
+    "k_stream": 6.978,
+    "maxi_factor": 2.5,
+    "k_jpeg": 1.0,
+    "jpeg_overhead": 10496,
+    "h264_factor": 1.22
+  },
+  "audio": {
+    "bitrate": 100,
+    "channels": 1
+  },
+  "features": {
+    "mtp": {
+      "enabled": false
+    },
+    "webrtc": {
+      "enabled": false
+    },
+    "bluetooth": {
+      "enabled": true,
+      "userspace_kb": 868
+    },
+    "npu_algo": {
+      "npu_pool_kb": 4096,
+      "algo_model_kb": 1229,
+      "inside_cma": true
+    }
+  },
+  "sdk_reserved": 113152,
+  "frame_sources": [
+    {
+      "enabled": true,
+      "sensor": 0,
+      "name": "FS0 主码流",
+      "w": 3840,
+      "h": 2160,
+      "nrvbs": 1,
+      "ivdc": true
+    },
+    {
+      "enabled": true,
+      "sensor": 0,
+      "name": "FS1 次码流/抓拍",
+      "w": 832,
+      "h": 480,
+      "nrvbs": 2,
+      "ivdc": false
+    }
+  ],
+  "encoders": [
+    {
+      "enabled": true,
+      "sensor": 0,
+      "name": "enc0 主码流",
+      "type": "H265",
+      "w": 3840,
+      "h": 2160,
+      "bitrate": 2000,
+      "ring_bitrate": 2000,
+      "ring": true
+    },
+    {
+      "enabled": true,
+      "sensor": 0,
+      "name": "enc1 次码流",
+      "type": "H265",
+      "w": 832,
+      "h": 480,
+      "bitrate": 350,
+      "ring_bitrate": 350,
+      "ring": true
+    },
+    {
+      "enabled": false,
+      "sensor": 0,
+      "name": "enc2 JPEG 抓拍",
+      "type": "JPEG",
+      "w": 832,
+      "h": 480,
+      "bitrate": 0,
+      "ring_bitrate": 0,
+      "ring": false
+    }
+  ],
+  "fixed": {
+    "kernel": 6501171,
+    "modules": 1782579,
+    "cma": 4194304,
+        "slab": 4071424,
+    "app_base": 2097152,
+    "miio_client": 1708032,
+    "miio_ot": 0,
+    "other_procs": 3565158,
+    "file_cache": 8283750,
+    "zram": 5242880
+  },
+  "calibrated": false
+}
