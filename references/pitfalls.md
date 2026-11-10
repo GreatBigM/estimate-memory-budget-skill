@@ -223,3 +223,21 @@ SigmaStar-256MB 拉流实测：anon 42,316KB → 44,636KB（+2.32MiB/客户端�
   现有 `pool_a/pool_b` 标定不含它，调了就把字节数加进 `sdk_reserved`，否则整块漏账。
 - **rmem 与 mem 必须等量互换**：`mem + rmem = 芯片真实内存`，只改 rmem 会改掉总内存（`SDK 使用指南` §2.1.4）。
   评估给 rmem 建议值时，要一并给出 mem。
+
+## 35. SigmaStar：`/proc/vmallocinfo` 求和 ≠ 内存占用
+
+实测（SSC303，2026-11-10）：`meminfo` 的 `VmallocUsed` = **10.62MiB**，而 `/proc/vmallocinfo` 全部求和 = **46.72MiB**。
+差的 36MiB 是 **ioremap/MMIO 地址映射，不消耗物理内存**：
+
+| 调用点 | 求和 | 性质 |
+|---|---|---|
+| `CamOsMemMap` | 25.0MiB | ISP/编码器的 MMIO 映射 |
+| `iotable_init` | 6.0MiB | 静态 iotable 映射 |
+| `MI_IPU_TASK_MappingChipTopIpuSpace` | 3.57MiB | IPU 空间映射 |
+| `load_module` | 3.67MiB | 35 个 `.ko`（真正占内存，已单列 modules） |
+| `kernel_clone` | 2.06MiB | 内核线程栈（占内存） |
+| `__zstd_init` | 1.24MiB | zstd 解压工作区（占内存） |
+
+**账只能用 `meminfo` 的 `VmallocUsed`**；`vmallocinfo` 只用来定位「谁在占 vmalloc 地址空间」，不能求和入账。
+kernel 计算口径：`code + data + (VmallocUsed − modules) + KernelStack + PageTables`。
+别拿君正的 kernel 基线（vmlinux 段，不含 vmalloc）直接对比——同口径下 SSC303 的 code+data 只有 5.29MiB。

@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.16.6 - 2026-11-10
+
+- pitfalls 新增 35：SigmaStar 上 `/proc/vmallocinfo` 求和（46.72MiB）≠ 内存占用（`VmallocUsed` 10.62MiB），
+  差的 36MiB 是 `CamOsMemMap`/`iotable_init`/IPU 空间等 MMIO 映射。
+- 明确 kernel 口径：`code + data + (VmallocUsed − modules) + KernelStack + PageTables`，
+  且不可与君正的 vmlinux 段基线直接比较（同口径下 SSC303 code+data 为 5.29MiB）。
+
 ## 0.16.5 - 2026-11-10
 
 - **Linux 系统基线实证**（SSC303 实机，formulas §7.5）：kernel 14.40MiB（code 4.74 + data 0.55 + vmalloc 净 7.09 + 栈 1.38 + 页表 0.64）、modules 3.53MiB（**35 个 .ko**）、slab 7.77、CMA 2.00，硬占用 27.71 —— 与模板 14.33/3.53/7.80/2.00 误差 ≤0.07MiB。
