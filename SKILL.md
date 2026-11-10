@@ -1,7 +1,7 @@
 ---
 name: estimate-memory-budget
 description: 嵌入式摄像头内存评估，双平台：君正 T32Pro（rmem 公式）/ SigmaStar（MMA 实测或公式）。支持单摄/双摄、MTP、H264/WebRTC，按五构件输出 Excel。
-version: 0.16.3
+version: 0.16.4
 category: embedded-memory
 metadata:
   agent:

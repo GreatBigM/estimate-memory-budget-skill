@@ -1,7 +1,7 @@
 {
   "_notes": [
-    "媒体块来源：官方单目 5M AOV realtime dump（2026-08）逐块扣除 demo 多开的 3 个编码上下文 1,912,960B，另加产品 OSD 1MiB。公式与系数见 references/formulas.md §7。",
     "realtime 链路：VIF→ISP→SCL→VENC，全链路 realtime ⇒ 堆内无 vif/scl 整帧；这是该配置的正常形态，不是漏采。",
+    "媒体块来源：官方单目 5M AOV realtime dump（2026-08）全量保留（含常驻 JPEG 0.13MiB），另加产品 OSD 1MiB；不扣除 demo 的额外编码上下文（1.73MiB），按保守口径计。",
     "cap 24MiB 为裁定量（used 17.4MiB + 余量），需在 bootargs mma_heap=...,sz=0x1800000 落实；Linux 可见 = DRAM − cap。",
     "4G 为外挂 Cat.1（模组侧跑 RTOS + 云栈，UART 为唯一通道）⇒ network.type=none，Linux 侧无网络栈；与 SigmaStar-256MB 样机同构。",
     "P2P 每客户端实测 +2.32MiB，按 clients 线性叠加；本模板置 0，有并发需求时填。",
@@ -22,10 +22,10 @@
     "cap_bytes": 25165824,
     "blocks": [
       {
-        "name": "VENC 编码器（主 5M + 次 480p + realtime 块）",
+        "name": "VENC 编码器（主 5M + 次 480p + 常驻 JPEG + realtime 块）",
         "group": "VENC",
-        "bytes": 8375808,
-        "note": "实测模块值 10,288,768 − demo 多开 1,912,960；recon 0.872×F + ES W×H/4"
+        "bytes": 10288768,
+        "note": "官方 dump 全量保留（不扣 demo 上下文）：recon 0.872×F + ES W×H/4 + ven_id3 JPEG 上下文 31KB + es_out_8 100KB"
       },
       {
         "name": "FS 帧源 VB (vif)",
@@ -43,7 +43,7 @@
         "name": "ISP + 3DNR(level3)",
         "group": "ISP",
         "bytes": 4630080,
-        "note": "实测：dnr_info1 3.41 主导，dnr0/wdr/sta/mload/cmdq 约 1.03"
+        "note": "实测：dnr_info1 3.41 主导"
       },
       {
         "name": "mi_sys 公共",
@@ -61,7 +61,7 @@
         "name": "IPU 人车推理（算法）",
         "group": "算法",
         "bytes": 1711488,
-        "note": "实测：ipu_chn0_network 0.66 + ipu_variable 0.92 + 端口；800×480 模型"
+        "note": "实测：network 0.66 + variable 0.92 + 端口"
       }
     ]
   },
