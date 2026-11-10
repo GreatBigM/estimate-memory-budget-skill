@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.16.2 - 2026-11-10
+
+- `templates/spec-sigmastar-5mp-aov.json`：4G 按**外挂 Cat.1** 计（模组侧跑 RTOS + 云栈，UART 唯一通道）⇒ `network.type=none`、`lte_supplicant_kb=0`，与 SigmaStar-256MB 样机同构。
+- 五项 96.06 → **95.56**，硬占用 77.19，128MiB 硬余 **50.81**（96MiB 18.81，64MiB 仍不可行）。
+- 消除「4G 已单列，确认 other_procs 是否双算」告警：`other_procs` 采自无 Linux 网络栈的样机，本就不含 supplicant。
+
 ## 0.16.1 - 2026-11-10
 
 - **君正口径按官方文档订正**（`T32Pro 1.0.1.0`，`媒体功能开发参考` 2026-04 / `SDK 使用指南`）：
