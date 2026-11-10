@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.16.7 - 2026-11-10
+
+- `spec-sigmastar-5mp-aov.json` 的 Linux 系统基线换成 SSC303 **实机实测值**：
+  kernel 14.40MiB（code 4.74 + data 0.55 + vmalloc 净 7.09 + 栈 1.38 + 页表 0.64）、modules 3.53（35 个 .ko）、
+  slab 7.77、CMA 2.00、file cache 23.14（运行时波动、可回收）。
+- 五项 93.73 → **98.54**（账面，差全在 file cache）；硬占用 75.35 → **75.40**，128MiB 硬余 52.65 → **52.60**。
+
 ## 0.16.6 - 2026-11-10
 
 - pitfalls 新增 35：SigmaStar 上 `/proc/vmallocinfo` 求和（46.72MiB）≠ 内存占用（`VmallocUsed` 10.62MiB），

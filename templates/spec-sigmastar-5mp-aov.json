@@ -2,6 +2,7 @@
   "_notes": [
     "realtime 链路：VIF→ISP→SCL→VENC，全链路 realtime ⇒ 堆内无 vif/scl 整帧；这是该配置的正常形态，不是漏采。",
     "媒体块来源：官方单目 5M AOV realtime dump（2026-08）全量保留（含常驻 JPEG 0.13MiB），另加产品 OSD 1MiB；不扣除 demo 的额外编码上下文（1.73MiB），按保守口径计。",
+    "Linux 系统取 SSC303 实机实测（2026-11-10）：kernel 14.40（code 4.74 + data 0.55 + vmalloc 净 7.09 + 栈 1.38 + 页表 0.64）、modules 3.53（35 个 .ko）、slab SUnreclaim 7.77、CMA 2.00、Cached 23.14（运行时波动、可回收）。",
     "cap 24MiB 为裁定量（used 17.4MiB + 余量），需在 bootargs mma_heap=...,sz=0x1800000 落实；Linux 可见 = DRAM − cap。",
     "4G 为外挂 Cat.1（模组侧跑 RTOS + 云栈，UART 为唯一通道）⇒ network.type=none，Linux 侧无网络栈；与 SigmaStar-256MB 样机同构。",
     "P2P 每客户端实测 +2.32MiB，按 clients 线性叠加；本模板置 0，有并发需求时填。",
@@ -81,15 +82,15 @@
   "ivdc_mem_line": 0,
   "sdk_reserved": 0,
   "fixed": {
-    "kernel": 15021616,
+    "kernel": 15103488,
     "modules": 3702784,
     "cma": 2097152,
-    "slab": 8179712,
+    "slab": 8151040,
     "app_base": 26426368,
     "miio_client": 0,
     "miio_ot": 0,
     "other_procs": 3420160,
-    "file_cache": 19267584,
+    "file_cache": 24264704,
     "zram": 0
   },
   "features": {
