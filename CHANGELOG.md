@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.16.3 - 2026-11-10
+
+- 5M AOV 模板：**AOV 与直播/录制共用同一 ring**，取消独立 AOV 录像通道（原 500kbps / 2fps / 60s，3.84MiB/摄）。
+- 单摄 ring 6.75 → **3.08MiB**（主 2.20 + 次 0.51 + 音频 0.38）；应用 28.86 → **25.20**；五项 95.56 → **91.90**；128MiB 硬余 50.81 → **54.47**。
+- 口径提示：共享 ring 的时间窗 = 容量 ÷ AOV 码率。主环 2.30MiB 在 500kbps 下覆盖约 **36s**；若产品要求 60s 事件前窗口，主环需回到 3.84MiB（ring 合计 4.55MiB），仍比双缓冲方案省 2.20MiB。
+
 ## 0.16.2 - 2026-11-10
 
 - `templates/spec-sigmastar-5mp-aov.json`：4G 按**外挂 Cat.1** 计（模组侧跑 RTOS + 云栈，UART 唯一通道）⇒ `network.type=none`、`lte_supplicant_kb=0`，与 SigmaStar-256MB 样机同构。
