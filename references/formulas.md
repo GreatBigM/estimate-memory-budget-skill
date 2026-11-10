@@ -448,3 +448,29 @@ P2P 每客户端实测 **+2.32MiB**（heap 增长，含发送队列），按客�
 - IPU 占用 = 模型决定（`ipu_chn0_network` + `ipu_variable`），换模型必须重测。
 - 不同 SDK 版本块名不同（SigmaStar-256MB 是 `dnr_info2` 4.22×2，官方 5M 是 `dnr_info1` 3.41），跨版本只能看 module 汇总，不能逐块对号。
 - SigmaStar 的 VENC pool 没有 `pool_a/pool_b`，不要套君正公式。
+
+### 7.5 Linux 系统实测基线（SSC303，2026-11-10）
+
+| 项 | 实测 | 口径 |
+|---|---|---|
+| Kernel code | 4.74 MiB | `/proc/iomem` 的 `Kernel code` 段 |
+| Kernel data | 0.55 MiB | `/proc/iomem` 的 `Kernel data` 段 |
+| VmallocUsed | 10.62 MiB | meminfo；**含模块，先扣 modules** |
+| − modules | −3.53 MiB | `/proc/modules` 求和（35 个 .ko） |
+| KernelStack | 1.38 MiB | meminfo |
+| PageTables | 0.64 MiB | meminfo |
+| **kernel 合计** | **14.40 MiB** | 模板 14.33，差 0.07 |
+| modules | 3.53 MiB | 模板 3.53，完全一致 |
+| slab（SUnreclaim） | 7.77 MiB | 模板 7.80 |
+| CMA | 2.00 MiB | bootargs `cma=2M` |
+| file cache | 23.14 MiB | `Cached`，运行时波动（另一次 26.6），可回收 |
+| **Linux 系统合计** | **50.85 MiB** | 硬占用 27.71（模板 27.65） |
+
+结论：模板的 kernel / modules / slab 基线在该板复现，误差 ≤0.07MiB；账面上的差全部来自 file cache，不影响硬余量判定。
+SigmaStar 的 `.ko` 数量明显多于君正同类机型（35 vs 11），别把两边的 modules 基线互套。
+
+```bash
+grep -iE 'Kernel code|Kernel data|vmalloc' /proc/iomem
+awk '{s+=$2} END{print s}' /proc/modules
+grep -E 'VmallocUsed|KernelStack|PageTables|Slab|SUnreclaim|Cached|Cma' /proc/meminfo
+```

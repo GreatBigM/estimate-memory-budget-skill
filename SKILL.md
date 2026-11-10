@@ -1,7 +1,7 @@
 ---
 name: estimate-memory-budget
 description: 嵌入式摄像头内存评估，双平台：君正 T32Pro（rmem 公式）/ SigmaStar（MMA 实测或公式）。支持单摄/双摄、MTP、H264/WebRTC，按五构件输出 Excel。
-version: 0.16.4
+version: 0.16.5
 category: embedded-memory
 metadata:
   agent:
@@ -182,7 +182,8 @@ rmem 侧驱动参数默认沿用同平台（4K-WiFi：`ivdc_mem_line=200 isp_mem
 cat /proc/cmdline                     # LX_MEM= / mma_heap=...,sz= / cma=
 cat /proc/mi_modules/mi_sys_mma/mma_heap_name0   # 堆 used/avail/HighPeak + 每个分配块
 cat /proc/meminfo | grep -E 'MemTotal|MemAvailable|Cached|Slab|SUnreclaim|VmallocUsed|KernelStack|PageTables|Cma'
-cat /proc/modules                     # modules 块（size 列求和）
+grep -iE 'Kernel code|Kernel data|vmalloc' /proc/iomem   # kernel 段实证（vmalloc 含模块）
+cat /proc/modules                     # modules 块（size 列求和；SSC303 实测 35 个）
 for d in /proc/[0-9]*; do r=$(awk '/VmRSS/{print $2}' $d/status 2>/dev/null); \
   t=$(awk '/Threads/{print $2}' $d/status 2>/dev/null); c=$(cat $d/comm 2>/dev/null); \
   [ -n "$r" ] && echo "$r $t $c"; done | sort -rn    # 应用与常驻进程

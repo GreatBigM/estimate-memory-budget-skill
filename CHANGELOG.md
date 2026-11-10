@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.16.5 - 2026-11-10
+
+- **Linux 系统基线实证**（SSC303 实机，formulas §7.5）：kernel 14.40MiB（code 4.74 + data 0.55 + vmalloc 净 7.09 + 栈 1.38 + 页表 0.64）、modules 3.53MiB（**35 个 .ko**）、slab 7.77、CMA 2.00，硬占用 27.71 —— 与模板 14.33/3.53/7.80/2.00 误差 ≤0.07MiB。
+- 账面差 4.8MiB 全部来自 file cache（实测 23.14，运行时会波动），不影响硬余量判定。
+- 采集清单补 `/proc/iomem` 的 kernel 段实证命令；注明两端 modules 数量不可互套（SigmaStar 35 vs 君正 11）。
+
 ## 0.16.4 - 2026-11-10
 
 - 5M AOV 模板媒体侧改为**保守口径**：官方 dump 全量保留，不再扣除 demo 的额外编码上下文（1.73MiB）。
