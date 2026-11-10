@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## 0.16.1 - 2026-11-10
+
+- **君正口径按官方文档订正**（`T32Pro 1.0.1.0`，`媒体功能开发参考` 2026-04 / `SDK 使用指南`）：
+  - `V_vb` 改为 `depth × F`，并注明 no-copy depth（`IMP_FrameSource_SetFrameDepthCopyType`）会让有效深度扩展，
+    配置的 nrVBs 只是下限，须用 `IMP_FrameSource_GetFrameDepth()` 取实际值。
+  - 明确 `pool_b` 的旋钮：`IMP_Encoder_SetMaxStreamCnt()`（CreateChn 前调用，默认非 JPEG=NR_MAX_ENC_CHN_STREAM、JPEG=1）、
+    `encAttr.bufSize=0` 时内部重算且过小会被放大。
+  - 新增 OSD rmem 项说明：`IMP_ISP_Tuning_SetOsdPoolSize` / `IMP_OSD_SetPoolSize` 独立申请，
+    现有 pool_a/pool_b 标定不含，调了计入 `sdk_reserved`。
+  - 新增 bootargs 约束：`mem + rmem = DRAM`，改 rmem 必须等量反改 mem，给建议值时要一并给 mem。
+- formulas.md 新增 §2b「君正 API 侧的三个修正项」；SKILL 操作 1 新增运行时取值一行、判定口径补 mem/rmem 约束。
+- `spec-template.json` 备注补君正三则；pitfalls 新增 34。
+
+## 0.16.0 - 2026-11-10
+
+- **SigmaStar 公式化**（`references/formulas.md` §7）：用一份官方单目 5M AOV realtime dump 反解出分块公式与系数——`VENC recon 0.872×F`、`ES Ring pool 默认 W×H/2`（可 `u32BufSize` 覆盖，实测用 /4）、`DNR 0.511×F@level3`、`SYS 1.46`、`SCL 0.40×F_out+0.59`、realtime 块 0.17MiB/个；回验官方 dump 误差 0.6%。
+- **绑定模式口径**：realtime 不落 DRAM 帧（VIF→ISP、ISP→SCL）；HW_RING = 1/4 帧；FRAME_BASE ≥3 帧且 `u32BufQueueDepth` 默认 4。heap 里没有 `vif_*` 不是漏采。
+- **ring 池公式坐实**（SigmaStar-256MB 开机日志 `ringbuffer.c:608/666`）：`size = bitrate(kbps)×128×秒`、`nodes = fps×秒`；通道 = 每摄（主/次/第三）+ 1 路 AOV 录像（2fps/60s/500kbps）+ 1 路音频；双摄合计 19.21MiB，与 smaps 匿名块吻合。
+- **应用侧拆分口径**：`固定 = smaps Anonymous 总量 − Σring`；纠正「基础 anon 不含 ring」的旧表注（那是重复计算口径）。
+- **P2P 每客户端实测 +2.32MiB**（SigmaStar-256MB 拉流，含发送队列），高于君正侧块大小估算。
+- 新增模板 `spec-sigmastar-5mp-aov.json`：单摄 5M AOV 4G，128MB / cap 24MiB / media 17.41MiB / app 28.86MiB / 五项 96.06 / 硬余 50.31。
+- `algo-models.md` 新增 `algo-sigma-ipu-800x480`（1,632KB，MMA 堆内，勿再填 npu_algo）。
+- pitfalls 新增 28~33：realtime 无 vif 块、默认 depth=4、ES 池默认 W×H/2、ring 公式与通道构成、smaps anon 含 ring、P2P 2.3MiB/客户端。
+
 ## 0.15.0 - 2026-11-10
 
 - **双平台模板**：新增 SigmaStar 路径（`media.source=measured`），与君正 T32Pro 的 rmem 公式路径并存；`platform_family()` 判平台。

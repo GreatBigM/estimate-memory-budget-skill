@@ -21,7 +21,7 @@ F      = W × H × 1.5                          # NV12 / YUV420SP 单帧
 I      = bitrate(kbps) × 2.5 × 1000 / 8       # 已废弃：仅历史标定使用；码率不参与 VENC pool
 P_venc = pool_a × F + pool_b                  # 编码器 pool：只与分辨率/编码流数有关，与码率无关
 V_ivdc = ivdc_mem_line × W × 1.5              # IVDC 直通：只分配行缓存
-V_vb   = nrVBs × F                            # 普通帧源：VB 数 × 整帧
+V_vb   = depth × F                            # 普通帧源：VB 数 × 整帧（depth 取运行时实际值，见下）
 J      = k_jpeg × F + jpeg_overhead           # JPEG 抓拍 pool
 M_s    = k_isp × max(F of sensor s)           # ISP MDNS：每个 sensor 一份
 R      = bitrate(kbps) × 128 × buffer_seconds # SDK 流缓存 ring（反汇编坐实）
@@ -46,6 +46,22 @@ WebRTC = fixed_kb×1024 + sessions × per_session_kb×1024
 换分辨率/产品族必须重标；不同产品族的 a/b 差异说明编码器配置（buffer 数/SDK 版本）不同。
 
 `R` 的 128 = `bitrate << 10 >> 3`，即 kbps → 字节/秒；来自 `libmike.a` 的 `ringbuffer_init`。
+
+### 2b. 君正 API 侧的三个修正项（`T32Pro 1.0.1.0` 文档，2026-04）
+
+1. **`V_vb` 的 depth 不是配置值**：启用 no-copy depth（`IMP_FrameSource_SetFrameDepthCopyType(chn, 非0)`）后，
+   有效深度会被扩展为该通道的缓冲数，配置的 nrVBs 只能当下限 —— 必须用
+   `IMP_FrameSource_GetFrameDepth()` 取实际生效值（`媒体功能开发参考` §2.4.11 / §2.4.12）。
+2. **`P_venc` 的 `pool_b` 是可调的**：码流 buffer 个数由 `IMP_Encoder_SetMaxStreamCnt()` 决定，且必须在
+   `IMP_Encoder_CreateChn()` 之前调用；默认非 JPEG 为 `NR_MAX_ENC_CHN_STREAM` 个、JPEG 为 1 个。
+   `encAttr.bufSize` 传 0 时内部重算，给定值过小会被自动放大到可接受范围（§5.5.18 / §5.4.x）。
+   ⇒ 换产品时 `pool_b` 会变，这两个 API 就是调 `pool_b` 的旋钮。
+3. **OSD 是独立 rmem 项**：`IMP_ISP_Tuning_SetOsdPoolSize()`（ISPOSD）与 `IMP_OSD_SetPoolSize()`
+   显式申请 rmem，未调用按 0；调了就把 size 计入 `sdk_reserved`，**不要**期望现有
+   `pool_a/pool_b` 标定已包含它（4K 标定点是在未设置该项时取的）。
+4. **rmem 是 bootargs 的一对参数**：`mem + rmem = 芯片真实内存`。改 rmem 必须等量反改 mem，
+   且 rmem 起始地址 = mem 大小（`SDK 使用指南` §2.1.4）。给「rmem 需求」时一并给出 mem 值，
+   只改 rmem 会改掉总内存。
 
 ## 3. 历史系数（4K-WiFi 2026-06，28MB 场景；不是当前默认）
 
@@ -361,3 +377,74 @@ CMA(非算法) = CMA 总量 −（NPU+算法，若含在 CMA）。
 3. `k_isp = 实测 MDNS / 最大帧字节`。
 4. 写回 spec 的 `coefficients`，重跑脚本；用『速查表』附表实测点对照『详细表』对应项，误差应 < 10%。
 5. 双摄分别核对两个 sensor 的 MDNS 与主编码 pool；两个 sensor 分辨率不同时 `k_isp` 要各算一次。
+
+## 7. SigmaStar（SSC/SSD 303 / iHalo / Iford）媒体与 ring 公式
+
+来源：官方单目 5M AOV realtime dump（2026-08-12 与 2026-10-20 两次）+ iHalo/Iford 文档 + SigmaStar-256MB 实机（2026-11-10）。从一份 dump 反解，跨分辨率未重标。
+
+### 7.1 绑定模式决定「有没有帧」
+
+| 绑定 | 帧缓冲 | 依据 |
+|---|---|---|
+| REALTIME | **0 帧**（直连，不落 DRAM） | `vif_zh.html` §1.1：realtime = 与后级硬件直连 |
+| HW_RING（SCL→VENC） | Ihalo/Iford = **1/4 张** | `venc_zh.html` §1.4.16 |
+| FRAME_BASE（默认） | **≥ 3 张**，每端口 `u32BufQueueDepth` 默认 **4** | `venc_zh.html` §1.4.16、`sys_zh.html` §2.4.13 |
+
+realtime 只在 `vif→isp`（全局 1 路）、`isp→scl`（多路）成立；**没有 VIF→VENC 直连**，VENC 前必须经 SCL。
+所以 realtime 配置的堆里**没有 `vif_*` 块是正常的**，不是漏采。
+
+### 7.2 分块公式（H.265，F = W×H×1.5）
+
+```
+MMA = 1.46                                   # mi_sys：CMDMEM 1.0 + codec 0.43 + meta 0.03
+    + Σ_enc (k_rec × F_enc)                  # VENC recon/工作缓冲
+    + Σ_enc (u32BufSize)                     # ES Ring pool，默认 W×H/2，可覆盖
+    + 0.17MiB × N_realtime                   # 每个 realtime 绑定上下文
+    + (k_dnr × F_max + 1.03)                 # ISP：3DNR + dnr0/wdr/sta/mload/cmdq 常数
+    + (0.40 × F_out + 0.59)                  # SCL：输出队列 + scl_ram
+    + IPU(model)                             # 查表（见 algo-models.md）
+    + RGN(layers)                            # demo 未开；产品按 OSD 层数 0.5~1.5
+    + Σ (depth × F)                          # 所有 framemode 输出端口
+```
+
+| 系数 | 值 | 来源 |
+|---|---|---|
+| `k_rec` | **0.872** | 5.82MiB / 6.674MiB；SigmaStar-256MB `ven_id0_0_*` 同为 5.82MiB 互证 |
+| `k_dnr`（level=3） | **0.511** | `dnr_info1` 3.41MiB / 6.674MiB；单点，降级收益未标定 |
+| realtime 块 | **0.17MiB** | 两份 dump 一致 |
+| ES 池默认 | **W×H/2** | `venc_zh.html` §1.4.17；实测被调成 W×H/4 |
+| SYS 常数 | **1.46MiB** | 实测 |
+| ISP 常数 | **1.03MiB** | dnr0+wdr+sta+mload+cmdq |
+
+回验官方 5M dump：16.35（两通道）+ 1.77（demo 多开的 3 个编码上下文）= **18.12 vs 实测 18.23，误差 0.6%**。
+
+### 7.3 ring 池（应用侧）
+
+```
+单通道 size  = bitrate(kbps) × 128 × 秒
+单通道 nodes = fps × 秒        # 144 = 12fps × 12s，即「144 帧」
+池大小       = Σ 各通道 size   # 一块连续匿名映射，smaps 可见
+```
+
+通道构成（SigmaStar-256MB 实测，每摄一组）：主码流 + 次码流 + 第三码流 + **1 路 AOV 录像** + 1 路音频。
+
+| 通道 | 码率 | fps | 秒 | size | nodes |
+|---|---|---|---|---|---|
+| 主 | 2000 | 12 | 12 | 3,072,000 | 144 |
+| 次 | 1000 | 12 | 12 | 1,536,000 | 144 |
+| 第三 | 800 | 12 | 12 | 1,228,800 | 144 |
+| AOV 录像 | 500 | 2 | **60** | 3,840,000 | 120 |
+| 音频 | 256 | 25 | 12 | 393,216 | 300 |
+
+双摄合计 20,140,032 B = **19.21MiB**，与 smaps 匿名块 19.25MiB 吻合（差 40KB 为 malloc 头）。
+应用侧：`固定 = smaps Anonymous 总量 − Σring`；SigmaStar-256MB 为 41.32 − 19.21 = **22.11MiB**。
+
+P2P 每客户端实测 **+2.32MiB**（heap 增长，含发送队列），按客户端数线性叠加。
+
+### 7.4 适用边界
+
+- 系数来自 **SSC303 + 单目 2880×1620 + H.265 + realtime** 一份 dump；换分辨率、H.264、多路级联必须重采。
+- `dnr_info1` 随 3DNR level 变（只标定 level=3），降级省多少未知，不要外推。
+- IPU 占用 = 模型决定（`ipu_chn0_network` + `ipu_variable`），换模型必须重测。
+- 不同 SDK 版本块名不同（SigmaStar-256MB 是 `dnr_info2` 4.22×2，官方 5M 是 `dnr_info1` 3.41），跨版本只能看 module 汇总，不能逐块对号。
+- SigmaStar 的 VENC pool 没有 `pool_a/pool_b`，不要套君正公式。

@@ -173,3 +173,53 @@ P2P 满客户端、缓存秒数取最大、JPEG 抓拍瞬时、SD 录像/上行�
 把目标码率从 1500 改到 2000，rmem 不变。
 码率只影响 Linux 侧 `R = bitrate × 128 × 缓存秒数`（libmike.a 反汇编坐实）。
 向导里仍问码率，是为了算 ring，不是为了算 rmem；不要再写「码率调高 → VENC pool 变大」。
+
+## 28. SigmaStar realtime 配置下堆里没有 `vif_*` 块，不是漏采
+
+`vif_zh.html` §1.1：realtime = VIF 与后级硬件直连，**不落 DRAM**；framemode 才先把数据传到 Dram。
+所以「官方 dump 找不到 vif 块」是配置使然，别去翻 `mma_heap_name1` 或判定漏采。
+反过来，看到 `vif_D0C0P0_priMma` 这类大块就说明该产品走的是 framemode，帧缓冲全在账上。
+
+## 29. 输出端口默认深度是 4 帧，不是 1
+
+`sys_zh.html` §2.4.13：`u32BufQueueDepth` 默认 **4**、`u32UserFrameDepth` 默认 0。
+5M 一帧 6.67MiB，漏设一个 framemode 端口的深度就是 27MiB。realtime / ring 绑定时 `u32UserFrameDepth` 必须为 0。
+评估时先确认代码里是否显式调过 `MI_SYS_SetChnOutputPortDepth`，没调就按 4 帧算。
+
+## 30. VENC 码流池默认按 W×H/2，能改小一半
+
+`venc_zh.html` §1.4.17：H.264/H.265/JPEG 默认 `Ring pool = W×H/2`，`u32BufSize=0` 时生效。
+官方 5M dump 用的是 **W×H/4**（`ven_es_out_0_0` 1,167,360B），说明显式调过。
+5M 双通道按默认比按 /4 多 2.2MiB；预算里要写明取值，不能默认按官方数值。
+
+## 31. ring 池按「码率×秒」，节点数按「fps×秒」
+
+开机日志坐实（`ringbuffer.c:608/666`）：
+`size = bitrate(kbps) × 128 × 秒`、`nodes = fps × 秒`（144 = 12fps×12s）。
+通道不是只有主/次：SigmaStar-256MB 每摄还有第三码流、**一路 AOV 录像**（2fps/60s/500kbps）和一路音频。
+只按主流算 ring 会漏掉一半以上（AOV 录像 3.84MiB/摄 比主流还大）。
+
+## 32. smaps 的 Anonymous 含 ring，别信「基础 anon 不含 ring」的表注
+
+SigmaStar-256MB 的 `Anonymous 41.32MiB` 里就有 19.21MiB 的 ring 池（开机日志逐通道对得上）。
+历史 Excel 把它标成「基础 anon，不含 ring」并另算 ring，属于重复计算口径；实测以 smaps 总量为准，
+要拆就 `固定 = 总 anon − Σring`。
+
+## 33. P2P 每客户端实测 ~2.3MiB，不是 1MiB
+
+SigmaStar-256MB 拉流实测：anon 42,316KB → 44,636KB（+2.32MiB/客户端），增长在 `[heap]` 里（发送队列 + 重传缓冲）。
+君正侧反汇编得出的「1,028KB 视频块 + 128KB 音频」是块本身，不含队列开销；SigmaStar 侧按 2.3MiB/客户端取。
+
+## 34. 君正三个 API 会改账面，不能只看配置值
+
+依据 `T32Pro 1.0.1.0`（`媒体功能开发参考` 2026-04 / `SDK 使用指南`）：
+
+- **no-copy depth**：`IMP_FrameSource_SetFrameDepthCopyType(chn, 非0)` 启用后，有效深度会被扩展为该通道的缓冲数
+  ⇒ 配置的 `nrVBs` 只是下限，必须用 `IMP_FrameSource_GetFrameDepth()` 读实际生效值（§2.4.11/§2.4.12）。
+- **码流 buffer 数**：`IMP_Encoder_SetMaxStreamCnt()` 必须在 `IMP_Encoder_CreateChn()` **之前**调用；
+  默认非 JPEG 为 `NR_MAX_ENC_CHN_STREAM` 个、JPEG 为 1 个；`encAttr.bufSize` 传 0 时内部重算，给太小会被自动放大。
+  这些直接进 VENC pool（即 `pool_b`），换产品必须重标或显式设小（§5.5.18）。
+- **OSD 池**：`IMP_ISP_Tuning_SetOsdPoolSize()` / `IMP_OSD_SetPoolSize()` 显式申请 rmem，是**独立项**；
+  现有 `pool_a/pool_b` 标定不含它，调了就把字节数加进 `sdk_reserved`，否则整块漏账。
+- **rmem 与 mem 必须等量互换**：`mem + rmem = 芯片真实内存`，只改 rmem 会改掉总内存（`SDK 使用指南` §2.1.4）。
+  评估给 rmem 建议值时，要一并给出 mem。

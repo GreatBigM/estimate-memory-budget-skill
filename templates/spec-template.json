@@ -8,7 +8,8 @@
     "frame_sources / encoders 数量不设上限（Excel 按 spec 动态生成行）",
     "fixed 可整体省略，默认取 4K-WiFi 实测基线；换项目建议实测后覆盖",
     "算法模型的 algo_model_kb 不用公式推：查 references/algo-models.md 登记表带入（常电人/车算法 1229KB）",
-    "WiFi 机型必须填 wifi_supplicant_kb：实测 wpa 1,608KB + udhcpc 468KB = 2,076KB（4K 样机 2026-11-09）；蓝牙开则 features.bluetooth.userspace_kb=868（miio_bt）"
+    "WiFi 机型必须填 wifi_supplicant_kb：实测 wpa 1,608KB + udhcpc 468KB = 2,076KB（4K 样机 2026-11-09）；蓝牙开则 features.bluetooth.userspace_kb=868（miio_bt）",
+    "君正口径三则（T32Pro 1.0.1.0 文档）：① nrVBs 只是下限，启用 no-copy depth 后用 IMP_FrameSource_GetFrameDepth() 取实际深度；② VENC 的 pool_b 由 IMP_Encoder_SetMaxStreamCnt()（必须在 CreateChn 前调用，默认非 JPEG=NR_MAX_ENC_CHN_STREAM、JPEG=1）决定；③ OSD 池（IMP_ISP_Tuning_SetOsdPoolSize / IMP_OSD_SetPoolSize）是独立 rmem 项，调了就把字节数加进 sdk_reserved"
   ],
   "project": "4k-wifi",
   "platform": "T32Pro",

@@ -18,6 +18,7 @@
 | ID | 算法 / 模型 | 适用产品 | 工作内存 KB | 来源 | 登记日期 | 计入口径 / 备注 |
 |---|---|---|---|---|---|---|
 | algo-normal-power-pv | **【常电】人/车算法**（检测 1.0MB + 辅助 0.2MB） | 4K-WiFi / 4K-4G / 双摄-1440p-WiFi / 双摄-1440p-4G（同款） | 1229 | 实机账户复盘（4K-WiFi） | 2026-11-09 | **4K-WiFi：池外单列 1229KB**（模型 + 池 3.5MB 合计 4.5MB）；**双摄-1440p-WiFi / 双摄-1440p-4G：已含在 NPU/CMA 池内**，与实测账（algo=0）吻合，勿再单列，否则双算；池 3.5MB 运行时会被吃干，不可缩 |
+| algo-sigma-ipu-800x480 | **【常电】人/车（SigmaStar IPU 800×480）** | 单目 5M AOV（SSC303） | 1632 | 官方 dump（2026-08） | 2026-11-10 | SigmaStar 的 IPU 在 **MMA 堆内**：`ipu_chn0_network` 0.66MiB + `ipu_variable` 0.92MiB + 输入/输出端口 0.05MiB；填 `media.blocks` 的 `group:"算法"`，**不要**再填 `npu_algo` |
 
 ## NPU 池参考值（不进本表，第 3 步单独问）
 

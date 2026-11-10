@@ -1,11 +1,11 @@
 ---
 name: estimate-memory-budget
-description: 嵌入式摄像头内存评估，双平台模板：君正 T32Pro（rmem 公式）/ SigmaStar（MMA 堆实测块）。支持单摄/双摄/多摄、MTP、H264/WebRTC，按五构件输出 Excel。
-version: 0.15.0
+description: 嵌入式摄像头内存评估，双平台：君正 T32Pro（rmem 公式）/ SigmaStar（MMA 实测或公式）。支持单摄/双摄、MTP、H264/WebRTC，按五构件输出 Excel。
+version: 0.16.1
 category: embedded-memory
 metadata:
   agent:
-    triggers: [内存评估, 内存预估, 内存占用, rmem 估算, 双摄内存, MTP 内存, H264 内存, WebRTC 内存, H264+WebRTC 版 内存, memory budget, MMA 堆, sigmastar 内存, SigmaStar-256MB 内存]
+    triggers: [内存评估, 内存预估, 内存占用, rmem 估算, 双摄内存, MTP 内存, H264 内存, WebRTC 内存, H264+WebRTC 版 内存, memory budget, MMA 堆, sigmastar 内存, AOV 内存, ring 池, SigmaStar-256MB 内存]
 ---
 
 # 内存预算评估
@@ -45,7 +45,7 @@ AI:  第0步 平台 → 第1块 RMEM（逐路 sensor：主/次/抓拍/继续）�
 | 规格字段 | `platform:"T32Pro"` + `frame_sources`/`encoders` | `platform:"SigmaStar"` + `media.source:"measured"` + `media.blocks[]` |
 | 算法 | NPU 池在 CMA（`inside_cma`） | IPU 在 **MMA 堆内**：`group:"算法"`，自动从 RMEM 划到算法块，不双算 |
 | Linux 可见 | `DRAM − rmem 需求` | `DRAM − media.cap_bytes`（与 used 无关，堆预留了就用不了） |
-| 模板 | `templates/spec-template.json`、`spec-4k-*.json`、`spec-dual-*.json` | `templates/spec-sigmastar.json`（骨架）、`spec-sigmastar-256mb.json`（实测示例） |
+| 模板 | `templates/spec-template.json`、`spec-4k-*.json`、`spec-dual-*.json` | `templates/spec-sigmastar.json`（骨架）、`spec-sigmastar-256mb.json`（双摄实测）、`spec-sigmastar-5mp-aov.json`（单摄 5M AOV，公式+实测） |
 
 五构件不变；SigmaStar 路径下 `frame_sources`/`encoders` 留空，媒体侧完全由 `media.blocks` 决定。
 
@@ -71,6 +71,7 @@ AI:  第0步 平台 → 第1块 RMEM（逐路 sensor：主/次/抓拍/继续）�
 | 平台 | **PRJ0xx**：`drivers/<DRIVER_DIRECTORY_NAME>/isp/tx-isp-PRJ0xx/` + `sensors/*_PRJ0xx.ko`；目录名由 `toolchain/*_cfg.cmake` 指定（双摄-1440p-4G 是 `t32_t33_3_10_14` / `t32_t33`） |
 | 流参数 / 缓存秒数 / P2P / sensor 数 | `applications/c_mi_ipc/project_configs/<project>_config.h`（`CAMERA_SENSOR_COUNT`、`MAX_P2P_CLIENTS`、`MIKE_STREAM_BUFFER_MAX_SECONDS`） |
 | 分辨率 / nrVBs / IVDC / fps / GOP / 目标码率 | `media_hal/video_hal_config.h` 的 `PROJECT_<project>` 分支（`SENSOR_NUM`、`FRAMESOURCE_COUNT`、`ENCODER_COUNT`） |
+| 实际生效 depth / 码流 buffer 数 / OSD 池 | 运行时：`IMP_FrameSource_GetFrameDepth()`、`IMP_Encoder_GetMaxStreamCnt()`、`IMP_ISP_Tuning_SetOsdPoolSize()` 的实际调用值 —— 启用 no-copy depth 后 nrVBs 只是下限（`references/formulas.md` §2b） |
 | P2P 音频块 / 视频发送块 | `mike_adapter/mike_p2p.c`（音频 32KB，`max_video_send_size`） |
 | ivdc_mem_line / isp_memopt / direct_mode | `third_party/rootfs/resource/system_bin/<project>/init.sh` |
 | MTP 是否启用 | 项目产品确认；`libmike.a` 内含 `mtp_*`（小米 KCP MTP SDK）；4K-4G 支持，双摄-1440p-4G 控制台有 MTP 日志但默认按 0 计 |
@@ -132,7 +133,7 @@ AI:  第0步 平台 → 第1块 RMEM（逐路 sensor：主/次/抓拍/继续）�
 | 选项 | 后续默认值来源 |
 |---|---|
 | T32Pro / PRJ0xx（君正） | 已有标定系数，可给验收级；走第 1 步 rmem 公式 |
-| SigmaStar（SSC/SSD 303 等） | 走「第 1 步 S：MMA 堆实测块」；有设备就直接采，无设备先用 `spec-sigmastar.json` 占位并标注未实测 |
+| SigmaStar（SSC/SSD 303 等） | 走「第 1 步 S：MMA 堆实测块」；有设备直接采，无设备按 `formulas.md` §7 公式算 blocks 并标注来源 |
 | T31 / T33 | 无系数，只给量级；提示需采集 `k_isp/pool_a/pool_b` |
 | 其他 SoC | 同 T31 |
 
@@ -171,7 +172,8 @@ rmem 侧驱动参数默认沿用同平台（4K-WiFi：`ivdc_mem_line=200 isp_mem
 不问分辨率——媒体内存由 SigmaStar 的 MMA 堆实测决定，分辨率只影响哪些块变大。要问的是：
 
 1. **有没有实机**：有 → 按下面命令采 `mma_heap_name0`，把 used 条目按 `task_name` 归组填 `media.blocks`；
-   没有 → 用 `templates/spec-sigmastar.json` 占位，全部标「未实测」，只给量级。
+   没有 → 按 `references/formulas.md` §7 的 SigmaStar 分块公式算 blocks（一份同平台 dump 即可反解系数，误差 ±10%），
+   模板 `templates/spec-sigmastar-5mp-aov.json`；公式给不出真值的项（ISP 常数、SYS、SCL ram、IPU 模型）按「查表」填实测值。
 2. **媒体堆容量 cap**：`cat /proc/cmdline | tr ' ' '\n' | grep mma_heap` 取 `sz=`（十六进制）。**必须填**，否则 Linux 可见被低估。
 
 采集（root 串口或 adb 均可）：
@@ -184,6 +186,11 @@ cat /proc/modules                     # modules 块（size 列求和）
 for d in /proc/[0-9]*; do r=$(awk '/VmRSS/{print $2}' $d/status 2>/dev/null); \
   t=$(awk '/Threads/{print $2}' $d/status 2>/dev/null); c=$(cat $d/comm 2>/dev/null); \
   [ -n "$r" ] && echo "$r $t $c"; done | sort -rn    # 应用与常驻进程
+
+# 应用侧 ring 池：重启抓开机日志（ringbuffer.c:608/666 逐通道打印）
+#  ringbuffer init : channel[0] bitrate[2000] fps[12], sec[12], maxFrame[1536000]
+#  Init Ring Buffer success: channel:0 size:3072000 nodes:144
+#  ring 池在 smaps 里是一块连续匿名映射，大小 = Σ 各通道 size
 ```
 
 归组规则（`task_name` → `group`）：`ven_*`→VENC、`vif*`→FS VB、`scl*`→SCL、`isp*/dnr*`→ISP、`ipu*`→**算法**、
@@ -193,8 +200,12 @@ for d in /proc/[0-9]*; do r=$(awk '/VmRSS/{print $2}' $d/status 2>/dev/null); \
 
 - `used` 与 `cap` 是两个数：五项合计里 RMEM 用 **used（扣算法块）**，`Linux 可见` 用 **cap**。
 - 算法块（IPU）在 MMA 堆内，填 `group:"算法"` 后脚本自动从 RMEM 划到算法块，**不要**再填 `npu_algo`。
+- **realtime 绑定不占 DRAM 帧**：VIF→ISP、ISP→SCL 走 realtime 时堆里没有 `vif_*`/帧块，不是漏采；
+  framemode 端口才按 `depth × F` 计，`u32BufQueueDepth` 默认 **4**（`sys_zh.html` §2.4.13），必须显式设小。
+- **应用侧 ring**：`size = bitrate(kbps) × 128 × 秒`、`nodes = fps × 秒`；通道构成 = 每摄（主/次/第三）
+  + 每摄 1 路 AOV 录像 + 每摄 1 路音频。`app_base` 取 smaps Anonymous **总量（含 ring）**，
+  已知 ring 时再单列会双算。
 - Linux 侧无网络栈时 `network.type="none"`（Cat.1/4G 在对端 RTOS，例如 EC718，UART 是唯一通道）。
-- 应用侧：`app_base` 取目标进程 `smaps` 的 Anonymous；ring/P2P 未拆开时把 `p2p`/`audio` 置 0，避免双算。
 - `zram`：设备有 `/dev/zram0` 但 `SwapTotal=0` 时填 0。
 
 ### 第 2 步 Linux 账：分 OS 层与应用层两块问
@@ -342,6 +353,7 @@ python3 scripts/estimate_memory.py --spec /tmp/mem_spec.json \
 - **可回收项不进账**：Slab 只计 `SUnreclaim`（SReclaimable 的 dentry/inode 不计）、Buffers 不计、file-backed text 不计；zram 按压力上界计入硬账（保守）。
 - **默认最大场景**：所有常驻组件在线（WiFi 的 `wpa_supplicant`、`bluetoothd`、`adbd`、`apphilogcat`、`storage_test`、`start_user_process` shell）+ 双 sensor 全流 + P2P 满客户端 + 缓存秒数取最大 + JPEG 抓拍瞬时 + SD 录像/上行同跑。稳态快照只作参考，无出处/估算项按上界取值。
 - **rmem 需求**由 MDNS + FS VB + VENC + JPEG + SDK 自动计算，不做输入；向上取整 1MB 作为 rmem 预留建议值。
+  落地时必须同时给 mem：`mem + rmem = 芯片真实内存`，只改 rmem 会改掉总内存（`SDK 使用指南` §2.1.4）。
 - Linux：`可见 = DRAM − rmem 需求`；`硬合计 = 动态 + 固定 + 网络/蓝牙 − file_cache`；`硬余量 = 可见 − 硬合计`。
 - 系统：`账面占用 = rmem + Linux 合计 +（独立 NPU/算法）`；`硬占用 = 账面 − file_cache`；`硬余量 = DRAM − 硬占用`。
 - 五项展开：`RMEM / Linux 系统 / Linux 应用 / 算法 / 其他`；账面预留 = DRAM − 五项合计，硬余量 = DRAM −（五项合计 − file_cache）。
@@ -358,7 +370,8 @@ python3 scripts/estimate_memory.py --spec /tmp/mem_spec.json \
 - `scripts/estimate_memory.py` — 规格 JSON → 计算（rmem/Linux/NPU/算法/最终预留）→ 动态生成 Excel → 重算校验；`--no-xlsx` 仅计算
 - `templates/spec-template.json` — **君正 T32Pro** 单摄规格骨架（4K-WiFi 默认，rmem 公式路径）
 - `templates/spec-sigmastar.json` — **SigmaStar** 骨架（MMA 堆实测块，`media.source=measured`，块待填）
-- `templates/spec-sigmastar-256mb.json` — SigmaStar 303 实测示例（SigmaStar-256MB 样机，256MB / MMA cap 135MiB / used 115.6MiB）
+- `templates/spec-sigmastar-256mb.json` — SigmaStar 303 双摄实测示例（256MB / MMA cap 135MiB / used 115.6MiB）
+- `templates/spec-sigmastar-5mp-aov.json` — 单摄 5M AOV 4G（128MB / cap 24MiB / 公式推断 17.4MiB / ring 6.75MiB）
 - `templates/spec-dual-1440p-wifi.json` — 双摄-1440p-WiFi 双摄规格（6 FS / 8 ENC，含 H264/JPEG 开关）
 - `templates/spec-4k-4g-mtp.json` — 4K-4G 单摄 4G 规格（MTP enabled，64MB / rmem 23.5MB / 9s）
 - `templates/spec-dual-1440p-h264-webrtc.json` — 双摄-1440p-H264-WebRTC 海外双摄（H264 + WebRTC，128MB / rmem 42MB）
