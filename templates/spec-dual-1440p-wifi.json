@@ -1,25 +1,26 @@
 {
   "_notes": [
-    "加 slab 行后五项 114.70（旧 110.82 为加 slab 前）",
-    "<项目D> 双摄 4G；<PRJxxx>；128MB DDR；bootargs mem=85M/rmem=43M；isp_memopt=8, ivdc_mem_line=810",
-    "2026-11-09 <项目D> idle 实测：continuous_mem_info 与 <项目C> 逐字节相同（used 42,776,320B）；MemFree 23,320K；c_mi_ipc anon 14,784K",
-    "本模板沿用 <项目C> 2026-11 实测系数/fixed；VENC 800/350 是源码值，但实际 pool 与 <项目C> 的 1800 拟合一致，rmem 会低约 0.86MiB",
-    "H264/WebRTC off；JPEG enc6/enc7 开机常驻；MTP 控制台有日志但默认按 0 计，拉流后复核",
-    "未拉流，最终五项合计/最终预留需峰值复测；已实测 rmem/MIKE SDK 偏差 ≤1MB",
+    "加 slab 行后五项 115.59（旧 111.65 与实测 111.66 吻合为加 slab 前）；slab 是否与旧拟合基线双算待 A/B",
+    "双摄-1440p-WiFi 双摄 WiFi；128MB DDR；bootargs mem=85M/rmem=43M；isp_memopt=8, ivdc_mem_line=810",
+    "2026-11-09 实机 continuous_mem_info 重标：rmem used 42,776,320 / cap 45,088,768",
+    "k_isp=0.7275, k_recon=0.8559, k_stream=1.4331；SDK 预留 4,657,792B（含 JPEG 额外块）",
+    "fixed 按 MemTotal 81,488K / MemFree 14,480K / Cached 21,092K / Slab 5,096K / Buffers 6,932K 校准",
+    "app_base 6,635,520B（c_mi_ipc anon 16,972K − 动态 10,743,808B）；miio_client 1,773,568B",
+    "H264+WebRTC 版 在此基础上 +1 路 480P H264 + 海外语控 SDK，另行预测",
     "算法为【常电】人/车算法（algo-normal-power-pv，1229KB），已含在 NPU 池 5120KB 内，algo_model_kb 保持 0，勿再单列"
   ],
-  "project": "<项目D>",
+  "project": "dual-1440p-wifi",
   "platform": "T32Pro",
   "network": {
-    "type": "4g",
-    "lte_supplicant_kb": 512,
+    "type": "wifi",
+    "wifi_supplicant_kb": 0,
+    "lte_supplicant_kb": 0,
     "lte_module_kb": 0
   },
   "dram_mb": 128,
-  "rmem_bootargs_mb": 43,
-  "buffer_seconds": 9,
+  "buffer_seconds": 8,
   "p2p": {
-    "clients": 2,
+    "clients": 3,
     "video_kb": 1536,
     "video_bufs": 1,
     "audio_kb": 32,
@@ -106,9 +107,9 @@
       "type": "H265",
       "w": 2880,
       "h": 1620,
-      "bitrate": 800,
+      "bitrate": 1800,
       "ring": true,
-      "ring_bitrate": 1800
+      "ring_bitrate": 2000
     },
     {
       "enabled": true,
@@ -139,9 +140,9 @@
       "type": "H265",
       "w": 2880,
       "h": 1620,
-      "bitrate": 800,
+      "bitrate": 1800,
       "ring": true,
-      "ring_bitrate": 1800
+      "ring_bitrate": 2000
     },
     {
       "enabled": true,
@@ -173,8 +174,7 @@
       "w": 832,
       "h": 480,
       "bitrate": 0,
-      "ring": false,
-      "ring_bitrate": 0
+      "ring": false
     },
     {
       "enabled": true,
@@ -184,8 +184,7 @@
       "w": 832,
       "h": 480,
       "bitrate": 0,
-      "ring": false,
-      "ring_bitrate": 0
+      "ring": false
     }
   ],
   "fixed": {
@@ -213,5 +212,5 @@
       "inside_cma": true
     }
   },
-  "calibrated": false
+  "calibrated": true
 }

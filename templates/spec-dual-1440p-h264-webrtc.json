@@ -1,13 +1,13 @@
 {
   "_notes": [
     "加 slab 行后五项 117.93（旧 114.05 为加 slab 前）；H264/WebRTC 仍未实测",
-    "<项目C-B01> = 2026-11-09 校准后的 <项目C> 基础 + 1 路 480P H264（默认 S0）+ 海外语控 SDK",
-    "<项目C> 基础系数：k_isp=0.7275, k_recon=0.8559, k_stream=1.4331；rmem used 42,776,320B",
+    "双摄-1440p-H264-WebRTC = 2026-11-09 校准后的 双摄-1440p-WiFi 基础 + 1 路 480P H264（默认 S0）+ 海外语控 SDK",
+    "双摄-1440p-WiFi 基础系数：k_isp=0.7275, k_recon=0.8559, k_stream=1.4331；rmem used 42,776,320B",
     "H264 无 RFC：pool = h264_factor(1.22) × 校准后的 H265 pool；默认只开 enc2",
-    "海外语控：KVS WebRTC/HWYK，1 会话 1MB + 128KB 固定；B01 未实机重标",
-    "B01 rmem 预测会超 42MB 预留；必须上机 continuous_mem_info 复核"
+    "海外语控：KVS WebRTC/HWYK，1 会话 1MB + 128KB 固定；H264+WebRTC 版 未实机重标",
+    "H264+WebRTC 版 rmem 预测会超 42MB 预留；必须上机 continuous_mem_info 复核"
   ],
-  "project": "<项目C>_b01",
+  "project": "dual_1440p_h264_webrtc",
   "platform": "T32Pro",
   "network": {
     "type": "wifi",
@@ -16,7 +16,6 @@
     "lte_module_kb": 0
   },
   "dram_mb": 128,
-  "rmem_bootargs_mb": 42,
   "buffer_seconds": 8,
   "p2p": {
     "clients": 3,
@@ -188,7 +187,7 @@
       "bitrate": 350,
       "ring_bitrate": 500,
       "ring": false,
-      "note": "B01 默认只开一路 480P H264；需要 S1 H264 时改 enabled=true"
+      "note": "H264+WebRTC 版 默认只开一路 480P H264；需要 S1 H264 时改 enabled=true"
     },
     {
       "enabled": true,

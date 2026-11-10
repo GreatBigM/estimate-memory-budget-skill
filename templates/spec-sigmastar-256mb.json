@@ -1,0 +1,69 @@
+{
+  "_notes": [
+    "SigmaStar 303 平台（SigmaStar-256MB 样机）：媒体内存不是 rmem 公式，而是 bootargs mma_heap 预留的 MMA 堆；media.source=measured 表示按 mma_heap_name0 实测块计。",
+    "实测 2026-11-10 直播态（串口 921600，root 无密码）：blocks 来自 /proc/mi_modules/mi_sys_mma/mma_heap_name0 的 used 条目按 task_name 归组。",
+    "cap_bytes = 0x8700000 = 141,557,760 B（bootargs mma_heap=...,sz=0x8700000）；used 121,191,872 B（85.6%），HighPeak 116.9 MiB。",
+    "算法（IPU）块在 MMA 堆内，group=算法 自动划到『算法』块，不重复计入 RMEM。",
+    "Linux 侧无网络栈：Cat.1 在 EC718 RTOS（UART），network.type=none；无 zram swap；无 miio_client。",
+    "app_base 取 mi_ipc smaps Anonymous 38,680KB（含 SDK ring/P2P/音频，未拆分，故 p2p/audio 置 0）。",
+    "kernel 含 vmalloc（已扣 modules 重叠）+ 内核栈 + 页表；slab 只计 SUnreclaim 7,988KB。",
+    "重采步骤见 SKILL.md 操作 4『SigmaStar 采集』。"
+  ],
+  "project": "sigmastar-256mb",
+  "platform": "SigmaStar",
+  "platform_family": "sigmastar",
+  "network": {
+    "type": "none",
+    "wifi_supplicant_kb": 0,
+    "lte_supplicant_kb": 0,
+    "lte_module_kb": 0
+  },
+  "media": {
+    "source": "measured",
+    "cap_bytes": 141557760,
+    "blocks": [
+      {"name": "VENC 编码器", "group": "VENC", "bytes": 42856320,
+       "note": "ven_id0_0_x 5.82MiB×4 + es_out 1MiB×3 + 次路 id2/3/4 小缓冲；8 编码通道"},
+      {"name": "FS 帧源 VB (vif)", "group": "FS VB", "bytes": 34992000,
+       "note": "vif_D0C0P0_priMma 16.69 + vif_D4C0P0_priMma 16.69 + out 小项"},
+      {"name": "SCL 缩放", "group": "SCL", "bytes": 17052480,
+       "note": "scl_D0C0P1 / D0C1P1 各 6.72MiB + ring 1.67MiB"},
+      {"name": "ISP + 3DNR", "group": "ISP", "bytes": 11822720,
+       "note": "dnr_info2 4.22MiB×2 + dnr_info1 1.13MiB×2 + 其他"},
+      {"name": "mi_sys 公共", "group": "SYS", "bytes": 6600832,
+       "note": "CMDMEM 1MiB + mma_heap_codec + 各 cmdq 小缓冲"},
+      {"name": "RGN / OSD", "group": "RGN", "bytes": 1993472,
+       "note": "多路 OSD 图层"},
+      {"name": "IPU 推理（算法）", "group": "算法", "bytes": 5874048,
+       "note": "ipu_chn0_network 3.34MiB + ipu_variable_0 1.81MiB + 小项；IPU 600MHz"}
+    ]
+  },
+  "dram_mb": 256,
+  "buffer_seconds": 6,
+  "p2p": {"clients": 0, "video_kb": 0, "video_bufs": 0, "audio_kb": 0, "audio_bufs": 0},
+  "audio": {"bitrate": 0, "channels": 1},
+  "ivdc_mem_line": 0,
+  "sdk_reserved": 0,
+  "fixed": {
+    "kernel": 15021616,
+    "modules": 3702784,
+    "cma": 2097152,
+    "slab": 8179712,
+    "app_base": 39608320,
+    "miio_client": 0,
+    "miio_ot": 0,
+    "other_procs": 3420160,
+    "file_cache": 19267584,
+    "zram": 0
+  },
+  "features": {
+    "mtp": {"enabled": false},
+    "webrtc": {"enabled": false},
+    "bluetooth": {"enabled": false},
+    "npu_algo": {"npu_pool_kb": 0, "algo_model_kb": 0, "inside_cma": false},
+    "slack": {"extra_threads": 0, "thread_stack_kb": 64}
+  },
+  "frame_sources": [],
+  "encoders": [],
+  "calibrated": true
+}

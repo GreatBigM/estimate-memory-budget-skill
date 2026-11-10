@@ -1,11 +1,11 @@
 ---
 name: estimate-memory-budget
-description: Ingenic T32Pro 内存评估：收集分辨率/码率/流配置，支持单摄/双摄/多摄、MTP 与 H264/WebRTC，按标定公式估算 rmem/Linux 内存并输出 Excel。
-version: 0.12.0
+description: 嵌入式摄像头内存评估，双平台模板：君正 T32Pro（rmem 公式）/ SigmaStar（MMA 堆实测块）。支持单摄/双摄/多摄、MTP、H264/WebRTC，按五构件输出 Excel。
+version: 0.15.0
 category: embedded-memory
 metadata:
   agent:
-    triggers: [内存评估, 内存预估, 内存占用, rmem 估算, 双摄内存, MTP 内存, H264 内存, WebRTC 内存, B01 内存, memory budget]
+    triggers: [内存评估, 内存预估, 内存占用, rmem 估算, 双摄内存, MTP 内存, H264 内存, WebRTC 内存, H264+WebRTC 版 内存, memory budget, MMA 堆, sigmastar 内存, SigmaStar-256MB 内存]
 ---
 
 # 内存预算评估
@@ -32,9 +32,22 @@ AI:  第0步 平台 → 第1块 RMEM（逐路 sensor：主/次/抓拍/继续）�
 | 输入 | 操作 | 输出 |
 |---|---|---|
 | 只有需求，没有完整规格 | 操作 1→2→3→4 | 聊天摘要 + Excel |
-| 规格已完整，只要数字 | 用 `templates/spec-template.json` 或 `templates/spec-dual-wifi.json` 填好跑脚本 | 聊天表格（可不出文件） |
+| 规格已完整，只要数字 | 用 `templates/spec-template.json` 或 `templates/spec-dual-1440p-wifi.json` 填好跑脚本 | 聊天表格（可不出文件） |
 | 有实测 pool / MDNS 数据 | 操作 5 重标定 → 重跑 | 新系数 + 新 Excel |
 | 只问某一档分辨率/码率 | 跑脚本或看 Excel 的「速查表」 | 聊天一行结论 |
+
+## 平台两分支（先定平台，再走流程）
+
+| | 君正 T32Pro（PRJ0xx） | SigmaStar（SSC/SSD 303 等） |
+|---|---|---|
+| 媒体内存形态 | rmem carve-out，由 MDNS/FS/VENC/JPEG 公式推导 | **MMA 堆**（bootargs `mma_heap=...,sz=`），按实测块归组 |
+| 数据源 | `/tmp/continuous_mem_info`、`impdbg --enc_info` | `/proc/mi_modules/mi_sys_mma/mma_heap_name0` |
+| 规格字段 | `platform:"T32Pro"` + `frame_sources`/`encoders` | `platform:"SigmaStar"` + `media.source:"measured"` + `media.blocks[]` |
+| 算法 | NPU 池在 CMA（`inside_cma`） | IPU 在 **MMA 堆内**：`group:"算法"`，自动从 RMEM 划到算法块，不双算 |
+| Linux 可见 | `DRAM − rmem 需求` | `DRAM − media.cap_bytes`（与 used 无关，堆预留了就用不了） |
+| 模板 | `templates/spec-template.json`、`spec-4k-*.json`、`spec-dual-*.json` | `templates/spec-sigmastar.json`（骨架）、`spec-sigmastar-256mb.json`（实测示例） |
+
+五构件不变；SigmaStar 路径下 `frame_sources`/`encoders` 留空，媒体侧完全由 `media.blocks` 决定。
 
 ## 通用输入规格（每次评估必问）
 
@@ -55,14 +68,14 @@ AI:  第0步 平台 → 第1块 RMEM（逐路 sensor：主/次/抓拍/继续）�
 
 | 字段 | 源码位置 |
 |---|---|
-| 平台 | **<PRJxxx>**：`drivers/<DRIVER_DIRECTORY_NAME>/isp/tx-isp-<PRJxxx>/` + `sensors/*_<PRJxxx>.ko`；目录名由 `toolchain/*_cfg.cmake` 指定（<项目D> 是 `t32_t33_3_10_14` / `t32_t33`） |
+| 平台 | **PRJ0xx**：`drivers/<DRIVER_DIRECTORY_NAME>/isp/tx-isp-PRJ0xx/` + `sensors/*_PRJ0xx.ko`；目录名由 `toolchain/*_cfg.cmake` 指定（双摄-1440p-4G 是 `t32_t33_3_10_14` / `t32_t33`） |
 | 流参数 / 缓存秒数 / P2P / sensor 数 | `applications/c_mi_ipc/project_configs/<project>_config.h`（`CAMERA_SENSOR_COUNT`、`MAX_P2P_CLIENTS`、`MIKE_STREAM_BUFFER_MAX_SECONDS`） |
 | 分辨率 / nrVBs / IVDC / fps / GOP / 目标码率 | `media_hal/video_hal_config.h` 的 `PROJECT_<project>` 分支（`SENSOR_NUM`、`FRAMESOURCE_COUNT`、`ENCODER_COUNT`） |
 | P2P 音频块 / 视频发送块 | `mike_adapter/mike_p2p.c`（音频 32KB，`max_video_send_size`） |
 | ivdc_mem_line / isp_memopt / direct_mode | `third_party/rootfs/resource/system_bin/<project>/init.sh` |
-| MTP 是否启用 | 项目产品确认；`libmike.a` 内含 `mtp_*`（小米 KCP MTP SDK）；<项目B> 支持，<项目D> 控制台有 MTP 日志但默认按 0 计 |
-| H264 / WebRTC | `<项目C>_config.h` 的 `MIKE_STREAM_SUPPORT_HWYK`；`video_hal_config.h` 的 `VIDEO_H264_IS_OPEN`（仅 B01=1） |
-| DRAM | uboot `PRJ.h` 的 bootargs；**rmem 由管线计算**，bootargs 值只作对照 |
+| MTP 是否启用 | 项目产品确认；`libmike.a` 内含 `mtp_*`（小米 KCP MTP SDK）；4K-4G 支持，双摄-1440p-4G 控制台有 MTP 日志但默认按 0 计 |
+| H264 / WebRTC | `dual-1440p-wifi_config.h` 的 `MIKE_STREAM_SUPPORT_HWYK`；`video_hal_config.h` 的 `VIDEO_H264_IS_OPEN`（仅 H264+WebRTC 版=1） |
+| DRAM | 硬件规格；uboot `PRJ.h` 只用于确认 DRAM 总量。**rmem 由管线计算，不是输入** |
 | 固定项基线 | 项目 CLAUDE.md 或既有内存卡片；没有就用模板默认 |
 
 项目不在 `/mnt/data/<project>/` 时，改为逐项问用户，并记录来源为「用户提供」。
@@ -75,32 +88,32 @@ AI:  第0步 平台 → 第1块 RMEM（逐路 sensor：主/次/抓拍/继续）�
 - FS 表有 `Sensor` 列（0/1/…）；**ISP MDNS 按 sensor 分组**，每组取该组最大帧，不是全机一份。
 - 每个 sensor 的 FS 组通常是：主（IVDC）+ 次 + 抓拍/H264；同一 sensor 的多个 FS 帧不能相加算 MDNS。
 - ENC 表的 `Sensor` 只用于可读性；VENC pool / ring 仍按通道独立累加。
-- H264：<项目C> 仅海外版 B01 开启（`VIDEO_H264_IS_OPEN`）；国内版 enc2/enc5 填 `enabled=false`。
-- JPEG：<项目C> 双摄 `video_hal_init` 开机创建 enc6/enc7；若项目已改按需建拆，把 `enabled` 改 false。
-- <项目C> 参考 `templates/spec-dual-wifi.json`：6 FS / 8 ENC（2 路 disabled H264 + 2 路 JPEG），128MB / rmem 43MB / 8s / 3 clients。
-- <项目D> 参考 `templates/spec-dual-4g.json`：双摄 4G，VENC 800/350，ring 1800/700，9s/2 clients，H264/WebRTC off。
+- H264：双摄-1440p-WiFi 仅海外版 H264+WebRTC 版 开启（`VIDEO_H264_IS_OPEN`）；国内版 enc2/enc5 填 `enabled=false`。
+- JPEG：双摄-1440p-WiFi 双摄 `video_hal_init` 开机创建 enc6/enc7；若项目已改按需建拆，把 `enabled` 改 false。
+- 双摄-1440p-WiFi 参考 `templates/spec-dual-1440p-wifi.json`：6 FS / 8 ENC（2 路 disabled H264 + 2 路 JPEG），128MB / rmem 43MB / 8s / 3 clients。
+- 双摄-1440p-4G 参考 `templates/spec-dual-1440p-4g.json`：双摄 4G，VENC 800/350，ring 1800/700，9s/2 clients，H264/WebRTC off。
 
 ## MTP（可选）
 
-- 小米 MTP SDK（`libmike.a` 内 `mtp_*`，KCP），**不是 USB MTP**；<项目B> 支持，<项目A>/<项目C> 默认不计。
+- 小米 MTP SDK（`libmike.a` 内 `mtp_*`，KCP），**不是 USB MTP**；4K-4G 支持，4K-WiFi/双摄-1440p-WiFi 默认不计。
 - 公式：`MTP = fixed_kb + sessions × ((wnd_rcv+wnd_snd)×MTU + overhead_kb)`。
 - SDK 常量：`WND_RCV=128`、`WND_SND=32`、`MTU=920`；默认 fixed=128KB、sessions=3、overhead=64KB/session ⇒ **769,280 B**。
 - 有实测就填 `features.mtp.measured_bytes`，优先于公式；用 app smaps 或 MTP 分配日志。
-- <项目B> 实测（2026-11-09）：rmem 24,200,960 B 与模型逐项吻合；app anon 6,652 kB ≈ 动态 4,510 kB + 基础 2,000 kB，MTP 0.73 MB 已含在内。
-- <项目B> 参考 `templates/spec-4k-4g.json`（MTP enabled）；<项目A>/<项目C> 默认 disabled。
+- 4K-4G 实测（2026-11-09）：rmem 24,200,960 B 与模型逐项吻合；app anon 6,652 kB ≈ 动态 4,510 kB + 基础 2,000 kB，MTP 0.73 MB 已含在内。
+- 4K-4G 参考 `templates/spec-4k-4g-mtp.json`（MTP enabled）；4K-WiFi/双摄-1440p-WiFi 默认 disabled。
 
-## 海外语控 SDK / H264（B01）
+## 海外语控 SDK / H264（H264+WebRTC 版）
 
-- <项目C-B01> = <项目C> 基础 + **1 路 480P H264**（默认 S0 enc2）+ WebRTC SDK；IMP 350kbps、SDK ring 500kbps。
+- 双摄-1440p-H264-WebRTC = 双摄-1440p-WiFi 基础 + **1 路 480P H264**（默认 S0 enc2）+ WebRTC SDK；IMP 350kbps、SDK ring 500kbps。
 - H264 编码器 pool 开机常驻；SDK ring 按需分配。若产品需要双 sensor H264，再开 enc5，rmem 再 +0.918 MiB。
 - H264 无 RFC：`pool = h264_factor × (pool_a×F + pool_b)`，默认 `h264_factor=1.22`（按 480P 比值）。
-- 海外语控 SDK 统称 WebRTC / Alexa / Google；B01 走 KVS WebRTC/HWYK（`<项目C-B01>_target/libmike.a`）。`webrtc = fixed + sessions×per_session`，默认 128KB + 1×1024KB = **1.125MB**（KVS 源码常量推导）。
-- 参考 `templates/spec-dual-wifi-b01.json`：6 FS / 8 ENC，默认只开 enc2 H264，WebRTC 开启。
-- 当前模型（校准后的 <项目C> 系数）估 rmem **41.57 / 42 MiB**（余 0.43），五项合计 **114.05 MiB**，最终预留 **13.95 MiB**（加 slab 前口径）；B01 未实机重标。
+- 海外语控 SDK 统称 WebRTC / Alexa / Google；H264+WebRTC 版 走 KVS WebRTC/HWYK（`dual-1440p-wifib01_target/libmike.a`）。`webrtc = fixed + sessions×per_session`，默认 128KB + 1×1024KB = **1.125MB**（KVS 源码常量推导）。
+- 参考 `templates/spec-dual-1440p-h264-webrtc.json`：6 FS / 8 ENC，默认只开 enc2 H264，WebRTC 开启。
+- 当前模型（校准后的 双摄-1440p-WiFi 系数）估 rmem **41.57 / 42 MiB**（余 0.43），五项合计 **114.05 MiB**，最终预留 **13.95 MiB**（加 slab 前口径）；H264+WebRTC 版 未实机重标。
 
-## 五项展开（系统汇总）
+## 五项展开（汇总 / 详细表）
 
-系统汇总固定按五项展示，每项带子项：
+汇总固定按五项各一行；逐项明细在详细表展开：
 
 1. **RMEM**：ISP MDNS / FS VB / VENC / JPEG / SDK 预留。
 2. **Linux 系统**：kernel + modules / CMA（非算法）/ **slab（仅 SUnreclaim）** / file cache / zram。
@@ -118,7 +131,8 @@ AI:  第0步 平台 → 第1块 RMEM（逐路 sensor：主/次/抓拍/继续）�
 
 | 选项 | 后续默认值来源 |
 |---|---|
-| T32Pro / <PRJxxx> | 已有标定系数，可给验收级 |
+| T32Pro / PRJ0xx（君正） | 已有标定系数，可给验收级；走第 1 步 rmem 公式 |
+| SigmaStar（SSC/SSD 303 等） | 走「第 1 步 S：MMA 堆实测块」；有设备就直接采，无设备先用 `spec-sigmastar.json` 占位并标注未实测 |
 | T31 / T33 | 无系数，只给量级；提示需采集 `k_isp/pool_a/pool_b` |
 | 其他 SoC | 同 T31 |
 
@@ -134,7 +148,7 @@ AI:  第0步 平台 → 第1块 RMEM（逐路 sensor：主/次/抓拍/继续）�
 
 3 路以上时，每轮只问「分辨率 + 继续」，其余按第 1 路克隆，除非用户明确要改。
 
-rmem 侧驱动参数默认沿用同平台（<项目A>：`ivdc_mem_line=200 isp_memopt=0x7 direct_mode=1`），只在用户要求改时问。
+rmem 侧驱动参数默认沿用同平台（4K-WiFi：`ivdc_mem_line=200 isp_memopt=0x7 direct_mode=1`），只在用户要求改时问。
 
 **建议码率表**（同平台历史值锚定，非表内分辨率按像素面积插值）：
 
@@ -152,13 +166,45 @@ rmem 侧驱动参数默认沿用同平台（<项目A>：`ivdc_mem_line=200 isp_m
 
 **码率只用于 SDK ring**：VENC pool 由分辨率/编码流数决定，与码率无关（pitfalls 27）；改码率只改 Linux 侧 `bitrate×128×秒`。
 
+### 第 1 步 S：SigmaStar 媒体块（替代上面的 rmem 公式，1~2 问）
+
+不问分辨率——媒体内存由 SigmaStar 的 MMA 堆实测决定，分辨率只影响哪些块变大。要问的是：
+
+1. **有没有实机**：有 → 按下面命令采 `mma_heap_name0`，把 used 条目按 `task_name` 归组填 `media.blocks`；
+   没有 → 用 `templates/spec-sigmastar.json` 占位，全部标「未实测」，只给量级。
+2. **媒体堆容量 cap**：`cat /proc/cmdline | tr ' ' '\n' | grep mma_heap` 取 `sz=`（十六进制）。**必须填**，否则 Linux 可见被低估。
+
+采集（root 串口或 adb 均可）：
+
+```bash
+cat /proc/cmdline                     # LX_MEM= / mma_heap=...,sz= / cma=
+cat /proc/mi_modules/mi_sys_mma/mma_heap_name0   # 堆 used/avail/HighPeak + 每个分配块
+cat /proc/meminfo | grep -E 'MemTotal|MemAvailable|Cached|Slab|SUnreclaim|VmallocUsed|KernelStack|PageTables|Cma'
+cat /proc/modules                     # modules 块（size 列求和）
+for d in /proc/[0-9]*; do r=$(awk '/VmRSS/{print $2}' $d/status 2>/dev/null); \
+  t=$(awk '/Threads/{print $2}' $d/status 2>/dev/null); c=$(cat $d/comm 2>/dev/null); \
+  [ -n "$r" ] && echo "$r $t $c"; done | sort -rn    # 应用与常驻进程
+```
+
+归组规则（`task_name` → `group`）：`ven_*`→VENC、`vif*`→FS VB、`scl*`→SCL、`isp*/dnr*`→ISP、`ipu*`→**算法**、
+`rgn*`→RGN、`ai_*`→AI 音频、其余（`CMDMEM`/`mma_heap_codec`/cmdq）→SYS。
+
+口径要点：
+
+- `used` 与 `cap` 是两个数：五项合计里 RMEM 用 **used（扣算法块）**，`Linux 可见` 用 **cap**。
+- 算法块（IPU）在 MMA 堆内，填 `group:"算法"` 后脚本自动从 RMEM 划到算法块，**不要**再填 `npu_algo`。
+- Linux 侧无网络栈时 `network.type="none"`（Cat.1/4G 在对端 RTOS，例如 EC718，UART 是唯一通道）。
+- 应用侧：`app_base` 取目标进程 `smaps` 的 Anonymous；ring/P2P 未拆开时把 `p2p`/`audio` 置 0，避免双算。
+- `zram`：设备有 `/dev/zram0` 但 `SwapTotal=0` 时填 0。
+
 ### 第 2 步 Linux 账：分 OS 层与应用层两块问
 
 #### 2a OS 层（含驱动，2 问）
 
 1. **Flash**：NOR / NAND。NAND 走 ubifs，`file_cache` 口径不同，记备注；不进 rmem 公式。
 2. **固定基线**：沿用同平台实测（kernel / modules / CMA / **slab** / cache / zram）/ 自定义。
-   新平台无基线时按量级给并标注「未实测」。`slab` 取 `SUnreclaim` 经验值（默认 4,071,424B），可回收部分不计。`modules` 基线含已加载 `.ko`（<项目A> `/proc/modules` 实测 1.70MB，含 tx-isp 0.86MB、aic8800_fdrv 0.38MB、bluetooth 0.20MB）；**用户态 wpa_supplicant 不在里面**，见 2b 网络。
+   新平台无基线时按量级给并标注「未实测」。`slab` 取 `SUnreclaim` 经验值（默认 4,071,424B），可回收部分不计。`modules` 基线含已加载 `.ko`（4K-WiFi `/proc/modules` 实测 1.70MB，含 tx-isp 0.86MB、aic8800_fdrv 0.38MB、bluetooth 0.20MB）；**用户态 wpa_supplicant 不在里面**，见 2b 网络。
+   SigmaStar：`kernel` = 内核 code+data（`/proc/iomem`）+ `VmallocUsed`（**先扣 modules，模块本身在 vmalloc 区**）+ `KernelStack` + `PageTables`；`CMA` 取 bootargs `cma=`。
 
 #### 2b 应用层（4 问）
 
@@ -169,9 +215,9 @@ rmem 侧驱动参数默认沿用同平台（<项目A>：`ivdc_mem_line=200 isp_m
    SD 录像与 NAS 的 8MB 传输缓冲都是写入/懒分配路径，不加字节，只记备注。
 4. **网络**：WiFi / 4G / WiFi+4G。
    - WiFi 机型追加一问 `network.wifi_supplicant_kb`：`未实测按 1536KB 估` / `已知实测 KB` / `基线已含，填 0`（填 0 会触发漏计警告）。
-     已知数据（<参考机> 2026-11-09 实测）：`wpa_supplicant` 992–1,608KB、`udhcpc` 432–468KB，最大场景取 **2,076KB**。
+     已知数据（4K 样机 2026-11-09 实测）：`wpa_supplicant` 992–1,608KB、`udhcpc` 432–468KB，最大场景取 **2,076KB**。
    - 4G supplicant 默认 512KB，可改。
-   - **蓝牙**（AIC8800 BT）追加一问「启用/不启用」：启用时 `features.bluetooth.enabled=true`，用户态按 `miio_bt` **868KB**（<参考机> 实测）；
+   - **蓝牙**（AIC8800 BT）追加一问「启用/不启用」：启用时 `features.bluetooth.enabled=true`，用户态按 `miio_bt` **868KB**（4K 样机 实测）；
      内核 `bluetooth.ko` 213,405B + `aic_btusb` 31,665B 应在 `fixed.modules` 基线内。
 
 缓存与 P2P 默认 6s / 2 clients（MIKE 应用账），用户要改才问。P2P 并发按单 client 线性叠加：每 client ≈ **1,028KB 视频 + 128KB 音频（估）**，直接乘 clients 数。
@@ -182,7 +228,7 @@ rmem 侧驱动参数默认沿用同平台（<项目A>：`ivdc_mem_line=200 isp_m
 ### 第 3 步 NPU + 算法（3 问，单独一步）
 
 1. **NPU 池**：CMA 默认 4MB / 按产品 `init.sh` 实测值（见 `references/algo-models.md` 池参考表）/ 自定义 KB。
-   池不可随手缩：<项目A> 的 3.5MB 在长测中被动态缓冲吃干（`need=323KB avail=24KB`）。
+   池不可随手缩：4K-WiFi 的 3.5MB 在长测中被动态缓冲吃干（`need=323KB avail=24KB`）。
 2. **算法模型**（多选）：先读 `references/algo-models.md`，按平台过滤登记项，列出「无算法」+ 各模型（名称 / KB / 来源）。
    选中多项则 KB 求和填入 `algo_model_kb`。表里没有的走 Other 填「名称 KB」，随后追加登记行。
 3. **NPU/算法是否含在 CMA**：在（CMA 池内，算法项单列，不从 CMA 双算）/ 不在（单独加）。
@@ -202,7 +248,7 @@ Excel + 聊天 / 仅聊天；项目名（Other 填，缺省 `new_t32pro`）。
 规则（跨步骤）：
 
 - 用户只改某一项时，只重问该项，其余沿用已确认值。
-- **VENC ≠ ring**：<项目B> 实测 VENC=1500/350、SDK ring=1800/400，分列填写。
+- **VENC ≠ ring**：4K-4G 实测 VENC=1500/350、SDK ring=1800/400，分列填写。
 - **算法模型只查表**：从 `references/algo-models.md` 取数；用户给的新模型追加登记行（名称/平台/KB/来源/日期），来源标「用户提供（待实测）」。
 - 缓存默认 6s；低于 6s 标「需产品确认」。
 - 规格确认后写 JSON，以 `templates/spec-template.json` 为骨架；已知项目直接用对应 `templates/spec-*.json`。
@@ -242,63 +288,82 @@ python3 scripts/estimate_memory.py --spec /tmp/mem_spec.json \
   --out /mnt/data/<project>/docs/<project>_Memory_Estimate.xlsx
 ```
 
-输出 6 个工作表：
+输出 5 个工作表：
 
 | 表 | 内容 |
 |---|---|
-| 说明 | 公式总览、数据来源、使用步骤、口径限制 |
-| 输入参数 | 规格（黄色可改）+ FS（含 Sensor）/ ENC 表 |
-| 内存估算 | MDNS 按 sensor 分行 + rmem / Linux 动态 / 固定项与预算判定 |
-| 标定校验 | 实测点、模型预测、误差、双点拟合 |
-| 速查表 | 常见分辨率 × 码率的横比（双摄按 sensor 各算一行） |
-| 系统汇总 | **RMEM / Linux 系统 / Linux 应用 / 算法 / 其他** 五项展开 + 五项合计 + **账面预留 / 硬占用 / 硬余量** |
+| 说明 | 五大块逐项构成：每项给公式或标「经验值/配置值/查表」，附两本账判定口径、数据来源、使用步骤 |
+| 输入详细 | 常用项在前（视频与连接 → FS/ENC 表 → 网络/蓝牙 → 功能开关 → NPU），固定基线居中，标定系数/常量集中在最后一节；黄色可改，备注列写默认值来源 |
+| 详细表 | 单表连续排列，A 列标块：RMEM / Linux 系统（kernel、modules 一级展开）/ Linux 应用（先按应用 c_mi_ipc、miio_client、miio_ot，再展开 c_mi_ipc 开销）/ 算法 / 其他；Excel 大纲支持二级折叠，块内小计 |
+| 汇总 | 每块一行的简化表：五项合计 + 账面预留 / 硬占用 / 硬余量 / 判定 |
+| 速查表 | 附录：分辨率×码率横比（双摄按 sensor 各一行）+ 实测标定点 + 历史实测基线（经验值）+ 采集命令 |
+
+### 详细表大纲层级（Excel 折叠规则）
+
+| 级别 | 行 |
+|---|---|
+| 0 | 各块小计（RMEM / Linux 系统 / Linux 应用 / 算法 / 其他）、建议 rmem carve-out、五大块合计 |
+| 1 | 块内成员：MDNS / FS VB / VENC / SDK 预留；kernel / modules / CMA / slab / file cache / zram；c_mi_ipc 合计 / miio_client / miio_ot；NPU 池 / 算法模型；other_procs / 网络 / 蓝牙 |
+| 2 | 成员开销：kernel 各段（.text/.rodata/.data/.bss/其他分配段/页表/栈/配平）、各 .ko、c_mi_ipc 开销（ring/音频/P2P/MTP/语控/线程/基础 anon） |
+
+规则：
+
+- 小计行永远比其成员低一级（summaryBelow）；块小计与五大块合计固定 0 级，折叠一级后仍能看到五块结论。
+- 跨折叠行的单元格不做纵向合并（Excel 显示不可靠）；块名只写在块首行，折叠后的归属靠小计行的 B 列名称辨认。
+- 只有 c_mi_ipc 有二级开销；miio_client / miio_ot 是叶子应用，不设「miio 小计」。
+- 输入详细的 kernel / modules 子项为 1 级大纲，父行为 0 级合计；`fixed.parts` 缺省时该块只有一行。
 
 脚本按 spec 动态生成行数，不再受固定模板容量限制；支持任意 FS / ENC 数。
-脚本会自动用 LibreOffice 重算缓存值，并校验 Excel 与 Python 模型一致（差 >0.5% 直接报错）。
+脚本会自动用 LibreOffice 重算缓存值，并校验 Excel 与 Python 模型的五大块小计（差 >0.5% 直接报错）。
 无 LibreOffice 时仍输出公式版，提示用户用 Excel 打开重算。
 
 ## 操作 5：重标定（可选）
 
 1. 采每个 sensor 主编码通道的 pool 实测字节：`impdbg --enc_info` 或 `/tmp/continuous_mem_info`。
 2. 用同产品两档实测值反解 `pool_a` / `pool_b`（`P = a×F + b`）；`k_isp = 实测 MDNS / 该 sensor 最大帧字节`。
-3. 写回 spec 的 `coefficients`，重跑脚本；「标定校验」误差应 < 10%。
+3. 写回 spec 的 `coefficients`，重跑脚本；用『速查表』附表的实测点对照『详细表』对应项，误差应 < 10%。
 4. 换 `isp_memopt`、换 SoC、换 H.264 时必须重标，不能沿用 H.265 系数；双摄两个 sensor 的 MDNS 可能不同，分别核对。
 
 ## 已知限制
 
-- `系统汇总` 是脚本快照，改 Excel 输入后需重跑脚本；`输入参数` 只覆盖视频/P2P/系数，network/NPU/fixed 在 spec JSON。
+- `详细表` / `汇总` 是公式表，改『输入详细』黄色格会自动重算；但 FS / ENC 行数变化、spec 系数变更需重跑脚本。
 - 未实测项目默认套用模板系数/fixed，只给量级；不要用未标定项目承诺 ≤1MB。
 
 ## 精度目标（验收）
 
 - 验收标准：同一项目标定后，**五项合计 / 最终预留与实测量的偏差 ≤1MB**；rmem、MIKE SDK 是中间项，尽量贴近。
 - 未实测项目只给量级，不承诺 1MB。
-- <项目B>（2026-11 实测）：五项合计 vs 实机总占用偏差 **0.41MB**，rmem 0.0005MB、MIKE SDK 0.014MB。
-- <项目C>（2026-11 实测）：五项合计 **111.65 vs 111.66MB（0.01MB）**，最终预留 **16.35MB**，rmem/MIKE SDK/miio 逐项吻合（加 slab 后 115.59，差 3.93，待 A/B）。
+- 4K-4G（2026-11 实测）：五项合计 vs 实机总占用偏差 **0.41MB**，rmem 0.0005MB、MIKE SDK 0.014MB。
+- 双摄-1440p-WiFi（2026-11 实测）：五项合计 **111.65 vs 111.66MB（0.01MB）**，最终预留 **16.35MB**，rmem/MIKE SDK/miio 逐项吻合（加 slab 后 115.59，差 3.93，待 A/B）。
 
 ## 判定口径
 
 - **两本判定**：`账面占用 = 五项合计`；`硬占用 = 五项合计 − file_cache`（page cache 可回收）。判 OK/超看**硬余量**，账面值只作趋势参考。设备能跑不等于账面 ≤ DRAM。
 - **可回收项不进账**：Slab 只计 `SUnreclaim`（SReclaimable 的 dentry/inode 不计）、Buffers 不计、file-backed text 不计；zram 按压力上界计入硬账（保守）。
 - **默认最大场景**：所有常驻组件在线（WiFi 的 `wpa_supplicant`、`bluetoothd`、`adbd`、`apphilogcat`、`storage_test`、`start_user_process` shell）+ 双 sensor 全流 + P2P 满客户端 + 缓存秒数取最大 + JPEG 抓拍瞬时 + SD 录像/上行同跑。稳态快照只作参考，无出处/估算项按上界取值。
-- **rmem 需求**由 MDNS + FS VB + VENC + JPEG + SDK 自动计算，不做输入；向上取整 1MB 作为 bootargs 建议值。
+- **rmem 需求**由 MDNS + FS VB + VENC + JPEG + SDK 自动计算，不做输入；向上取整 1MB 作为 rmem 预留建议值。
 - Linux：`可见 = DRAM − rmem 需求`；`硬合计 = 动态 + 固定 + 网络/蓝牙 − file_cache`；`硬余量 = 可见 − 硬合计`。
 - 系统：`账面占用 = rmem + Linux 合计 +（独立 NPU/算法）`；`硬占用 = 账面 − file_cache`；`硬余量 = DRAM − 硬占用`。
 - 五项展开：`RMEM / Linux 系统 / Linux 应用 / 算法 / 其他`；账面预留 = DRAM − 五项合计，硬余量 = DRAM −（五项合计 − file_cache）。
 - 固定项是历史实测基线；file cache / zram 可回收/压缩，判定看趋势，不当硬上限。
 - 单位统一用 MiB（1,048,576 B）；对外说「MB」时注明按 1024 换算。
 - 两本账不相加：rmem 需求先从 DRAM 扣掉，再算 Linux 可见；rmem 不能拿 Linux 余量补。
-- 本模型只对 **Ingenic T32Pro（<PRJxxx>）** 标定；T31/T33/其他平台必须重新采集系数。
+- 本模型只对 **Ingenic T32Pro（PRJ0xx）** 标定；T31/T33/其他平台必须重新采集系数。
+- **SigmaStar 判定**：`RMEM 块 = Σ media.blocks(非算法)`；`算法块 = Σ media.blocks(group=算法)`；`Linux 可见 = DRAM − media.cap_bytes`;
+  五项仍是 RMEM / Linux 系统 / Linux 应用 / 算法 / 其他，`账面预留 = DRAM − 五项合计`。cap 与 used 的差额是「预留了但没用」，不是可用内存。
+- 两个平台的账不能互推：SigmaStar 的 VENC pool 由 mi_venc 按通道/分辨率自行分配，没有 `pool_a/pool_b` 这组系数。
 
 ## 支持文件清单
 
 - `scripts/estimate_memory.py` — 规格 JSON → 计算（rmem/Linux/NPU/算法/最终预留）→ 动态生成 Excel → 重算校验；`--no-xlsx` 仅计算
-- `templates/spec-template.json` — 单摄规格骨架（<项目A> 默认）
-- `templates/spec-dual-wifi.json` — <项目C> 双摄规格（6 FS / 8 ENC，含 H264/JPEG 开关）
-- `templates/spec-4k-4g.json` — <项目B> 单摄 4G 规格（MTP enabled，64MB / rmem 23.5MB / 9s）
-- `templates/spec-dual-wifi-b01.json` — <项目C-B01> 海外双摄（H264 + WebRTC，128MB / rmem 42MB）
-- `templates/spec-4k-wifi.json` — <项目A> 单摄 4K 预测（MTP/WebRTC 关闭，NPU 4MB）
-- `templates/spec-dual-4g.json` — <项目D> 双摄 4G（VENC 800/350，ring 1800/700，9s/2 clients，H264/WebRTC off）
+- `templates/spec-template.json` — **君正 T32Pro** 单摄规格骨架（4K-WiFi 默认，rmem 公式路径）
+- `templates/spec-sigmastar.json` — **SigmaStar** 骨架（MMA 堆实测块，`media.source=measured`，块待填）
+- `templates/spec-sigmastar-256mb.json` — SigmaStar 303 实测示例（SigmaStar-256MB 样机，256MB / MMA cap 135MiB / used 115.6MiB）
+- `templates/spec-dual-1440p-wifi.json` — 双摄-1440p-WiFi 双摄规格（6 FS / 8 ENC，含 H264/JPEG 开关）
+- `templates/spec-4k-4g-mtp.json` — 4K-4G 单摄 4G 规格（MTP enabled，64MB / rmem 23.5MB / 9s）
+- `templates/spec-dual-1440p-h264-webrtc.json` — 双摄-1440p-H264-WebRTC 海外双摄（H264 + WebRTC，128MB / rmem 42MB）
+- `templates/spec-4k-wifi.json` — 4K-WiFi 单摄 4K 预测（MTP/WebRTC 关闭，NPU 4MB）
+- `templates/spec-dual-1440p-4g.json` — 双摄-1440p-4G 双摄 4G（VENC 800/350，ring 1800/700，9s/2 clients，H264/WebRTC off）
 - `references/formulas.md` — 公式推导、双点拟合、系数来源、双摄与适用边界
 - `references/algo-models.md` — 算法模型工作内存登记表（查表法，含 NPU 池参考值；新模型登记到这里）
 - `references/pitfalls.md` — 口径陷阱：rmem 不可见、宏名假账、JPEG 按需、双摄不是乘 2 等

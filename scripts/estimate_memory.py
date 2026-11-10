@@ -24,15 +24,17 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.worksheet.pagebreak import Break
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MIB = 1024 * 1024
 FIXED_KEYS = ("kernel", "modules", "cma", "slab", "app_base", "miio_client", "miio_ot", "other_procs", "file_cache", "zram")
 
 DEFAULTS = {
-    "project": "<项目A>",
+    "project": "4k-wifi",
     "platform": "T32Pro",
     "network": {"type": "wifi", "wifi_supplicant_kb": 0, "lte_supplicant_kb": 0, "lte_module_kb": 0},
+    "media": {"source": "formula", "cap_bytes": 0, "blocks": []},
     "dram_mb": 64,
     "buffer_seconds": 6,
     "p2p": {"clients": 2, "video_kb": 1024, "video_bufs": 1, "audio_kb": 32, "audio_bufs": 2},
@@ -88,10 +90,31 @@ def frame_bytes(w, h):
     return float(w) * float(h) * 1.5
 
 
+def platform_family(spec):
+    """君正 T32Pro 走 rmem 公式；SigmaStar 走 MMA 堆实测块；其它未知平台只给量级。"""
+    p = str(spec.get("platform", "")).replace(" ", "").lower()
+    if "sigma" in p or p in ("ssc303", "ssd303", "ihalo"):
+        return "sigmastar"
+    return "t32pro" if p == "t32pro" else "other"
+
+
+def is_measured(spec):
+    return (spec.get("media") or {}).get("source") == "measured"
+
+
 def _warnings(spec):
     warns = []
-    if str(spec.get("platform", "")).replace(" ", "").lower() != "t32pro":
-        warns.append(f"平台 {spec.get('platform')} 非 T32Pro：系数按 T32Pro 标定，需重标")
+    fam, measured = platform_family(spec), is_measured(spec)
+    if measured:
+        media = spec.get("media") or {}
+        if fam != "sigmastar":
+            warns.append(f"media.source=measured 但平台 {spec.get('platform')} 不是 SigmaStar：确认口径")
+        if not media.get("blocks") or sum(float(b.get("bytes", 0)) for b in media["blocks"]) == 0:
+            warns.append("media.blocks 为空或全为 0：媒体侧按 0 计，请填 mma_heap_name0 实测块")
+        if not media.get("cap_bytes"):
+            warns.append("未填 media.cap_bytes（媒体堆容量）：Linux 可见按 used 计，会低估 carve-out")
+    elif fam != "t32pro":
+        warns.append(f"平台 {spec.get('platform')} 非 T32Pro：系数按 T32Pro 标定，需重标；SigmaStar 请改用 media.source=measured")
     enabled = [e for e in spec["encoders"] if e.get("enabled")]
     if any(str(e.get("type", "")).upper() == "H264" for e in enabled):
         warns.append("含 H264 通道：按 H265 模型 × h264_factor 估算，建议重标")
@@ -120,9 +143,9 @@ def _warnings(spec):
     if nt in ("4g", "wifi+4g") and spec.get("fixed", {}).get("other_procs", 0) > 0:
         warns.append("4G 已单列；确认 other_procs 不再包含 4G supplicant，避免双算")
     if nt in ("wifi", "wifi+4g") and float(net.get("wifi_supplicant_kb", 0)) <= 0:
-        warns.append("WiFi 机型未填 network.wifi_supplicant_kb：wpa_supplicant 可能已含在 other_procs 快照，也可能漏计（<参考机> 实测 wpa 1,608KB + udhcpc 468KB）")
+        warns.append("WiFi 机型未填 network.wifi_supplicant_kb：wpa_supplicant 可能已含在 other_procs 快照，也可能漏计（4K 样机 实测 wpa 1,608KB + udhcpc 468KB）")
     if spec.get("features", {}).get("bluetooth", {}).get("enabled"):
-        warns.append("蓝牙按 miio_bt 用户态 868KB 计（<参考机> 实测）；内核模块 bluetooth.ko + aic_btusb 约 240KB 应在 fixed.modules 基线内，若基线未含需自行加回")
+        warns.append("蓝牙按 miio_bt 用户态 868KB 计（4K 样机 实测）；内核模块 bluetooth.ko + aic_btusb 约 240KB 应在 fixed.modules 基线内，若基线未含需自行加回")
     sl = spec.get("features", {}).get("slack", {})
     if float(sl.get("extra_threads", 0)) > 0:
         warns.append(f"新增 {sl.get('extra_threads')} 个线程按 {sl.get('thread_stack_kb', 64)}KB/线程计（常见配置；基准线程栈已含在 app_base）")
@@ -137,40 +160,53 @@ def _warnings(spec):
 
 def compute(spec):
     c = spec["coefficients"]
+    media = spec.get("media") or {}
+    measured = is_measured(spec)
+    blocks = media.get("blocks") or []
     fs_enabled = [x for x in spec["frame_sources"] if x.get("enabled")]
 
-    sensor_max = OrderedDict()
-    for x in fs_enabled:
-        s = int(x.get("sensor", 0))
-        sensor_max[s] = max(sensor_max.get(s, 0.0), frame_bytes(x["w"], x["h"]))
-    mdns_by_sensor = OrderedDict((s, c["k_isp"] * f) for s, f in sorted(sensor_max.items()))
-    mdns = sum(mdns_by_sensor.values())
+    if measured:
+        # SigmaStar：媒体侧按 mma_heap_name0 实测块，不走 rmem 公式
+        mdns_by_sensor, mdns, fs_vb = OrderedDict(), 0.0, 0.0
+        venc_items, rings = [], 0.0
+        media_algo = sum(float(b.get("bytes", 0)) for b in blocks if b.get("group") == "算法")
+        rmem = sum(float(b.get("bytes", 0)) for b in blocks
+                   if b.get("group") != "算法") + float(spec.get("sdk_reserved", 0) or 0)
+    else:
+        media_algo = 0.0
+        sensor_max = OrderedDict()
+        for x in fs_enabled:
+            s = int(x.get("sensor", 0))
+            sensor_max[s] = max(sensor_max.get(s, 0.0), frame_bytes(x["w"], x["h"]))
+        mdns_by_sensor = OrderedDict((s, c["k_isp"] * f) for s, f in sorted(sensor_max.items()))
+        mdns = sum(mdns_by_sensor.values())
 
-    fs_vb = sum(
-        spec["ivdc_mem_line"] * x["w"] * 1.5 if x.get("ivdc")
-        else x.get("nrvbs", 0) * frame_bytes(x["w"], x["h"])
-        for x in fs_enabled
-    )
+        fs_vb = sum(
+            spec["ivdc_mem_line"] * x["w"] * 1.5 if x.get("ivdc")
+            else x.get("nrvbs", 0) * frame_bytes(x["w"], x["h"])
+            for x in fs_enabled
+        )
 
-    venc_items, rings = [], 0.0
-    for e in spec["encoders"]:
-        if not e.get("enabled"):
-            continue
-        f = frame_bytes(e["w"], e["h"])
-        codec = str(e.get("type", "")).upper()
-        if codec == "JPEG":
-            pool = c["k_jpeg"] * f + c["jpeg_overhead"]
-        else:
-            if c.get("pool_a") is not None:
-                pool = float(c["pool_a"]) * f + float(c.get("pool_b", 0))
+        venc_items, rings = [], 0.0
+        for e in spec["encoders"]:
+            if not e.get("enabled"):
+                continue
+            f = frame_bytes(e["w"], e["h"])
+            codec = str(e.get("type", "")).upper()
+            if codec == "JPEG":
+                pool = c["k_jpeg"] * f + c["jpeg_overhead"]
             else:
-                max_i = float(e.get("bitrate", 0)) * c["maxi_factor"] * 1000.0 / 8.0
-                pool = c["k_recon"] * f + c["k_stream"] * max_i
-            if codec == "H264":
-                pool *= c.get("h264_factor", 1.22)
-            if e.get("ring") and codec != "JPEG":
-                rings += float(e.get("ring_bitrate", e.get("bitrate", 0))) * 128.0 * spec["buffer_seconds"]
-        venc_items.append({"name": e.get("name", "enc"), "bytes": pool, "sensor": e.get("sensor", 0), "type": codec})
+                if c.get("pool_a") is not None:
+                    pool = float(c["pool_a"]) * f + float(c.get("pool_b", 0))
+                else:
+                    max_i = float(e.get("bitrate", 0)) * c["maxi_factor"] * 1000.0 / 8.0
+                    pool = c["k_recon"] * f + c["k_stream"] * max_i
+                if codec == "H264":
+                    pool *= c.get("h264_factor", 1.22)
+                if e.get("ring") and codec != "JPEG":
+                    rings += float(e.get("ring_bitrate", e.get("bitrate", 0))) * 128.0 * spec["buffer_seconds"]
+            venc_items.append({"name": e.get("name", "enc"), "bytes": pool, "sensor": e.get("sensor", 0), "type": codec})
+        rmem = mdns + fs_vb + sum(x["bytes"] for x in venc_items) + spec["sdk_reserved"]
 
     a = spec["audio"]
     audio_ring = float(a.get("bitrate", 0)) * 128.0 * spec["buffer_seconds"] * a.get("channels", 1)
@@ -203,9 +239,9 @@ def compute(spec):
         else:
             webrtc = w.get("fixed_kb", 128) * 1024.0 + w.get("sessions", 1) * w.get("per_session_kb", 1536) * 1024.0
 
-    rmem = mdns + fs_vb + sum(x["bytes"] for x in venc_items) + spec["sdk_reserved"]
+    media_cap = float(media.get("cap_bytes", 0) or 0)
     linux_dyn = rings + audio_ring + p2p + mtp + webrtc
-    linux_visible = spec["dram_mb"] * MIB - rmem
+    linux_visible = spec["dram_mb"] * MIB - (media_cap if media_cap > 0 else rmem + media_algo)
     linux_total = linux_dyn + fixed_total
 
     net = spec.get("network", {})
@@ -257,7 +293,7 @@ def compute(spec):
         + float(spec["fixed"].get("file_cache", 0)) + float(spec["fixed"].get("zram", 0))
     )
     linux_apps = apps["mike_total"] + apps["miio_total"]
-    algorithm = npu_algo_bytes
+    algorithm = npu_algo_bytes + media_algo   # SigmaStar 的 IPU 块在媒体堆内，划到算法块
     other = apps["other_total"]
     top_total = rmem + linux_system + linux_apps + algorithm + other
     system_used = top_total
@@ -266,9 +302,6 @@ def compute(spec):
     linux_total_hard = linux_total_full - file_cache
     hard_total = top_total - file_cache
     hard_reserve = spec["dram_mb"] * MIB - hard_total
-    bootargs_rmem_kb = float(spec.get("rmem_bootargs_mb", 0)) * 1024.0
-    bootargs_need_gap = max(0.0, bootargs_rmem_kb * 1024.0 - rmem)
-    runtime_reserve = final_reserve - bootargs_need_gap
 
     return {
         "project": spec["project"],
@@ -277,6 +310,9 @@ def compute(spec):
         "system": {
             "dram": spec["dram_mb"] * MIB,
             "rmem_need": rmem,
+            "media_cap": media_cap,
+            "media_used": rmem + media_algo,
+            "measured": measured,
             "linux_dynamic": linux_dyn, "linux_fixed": fixed_total,
             "network": network_kb * 1024.0,
             "bluetooth": bluetooth_kb * 1024.0,
@@ -299,13 +335,14 @@ def compute(spec):
             "npu_algo": npu_algo_kb * 1024.0, "inside_cma": inside_cma,
             "system_used": system_used, "final_reserve": final_reserve,
             "hard_total": hard_total, "hard_reserve": hard_reserve,
-            "bootargs_rmem": bootargs_rmem_kb * 1024.0,
-            "runtime_reserve": runtime_reserve,
         },
         "rmem": {
             "mdns_by_sensor": mdns_by_sensor, "mdns": mdns, "fs_vb": fs_vb,
             "venc": venc_items, "sdk_reserved": spec["sdk_reserved"],
             "total": rmem, "need": rmem,
+            "measured": measured, "blocks": blocks,
+            "cap": media_cap if media_cap > 0 else rmem + media_algo,
+            "usage": (rmem + media_algo) / media_cap if media_cap > 0 else 0.0,
         },
         "linux": {
             "rings": rings, "audio_ring": audio_ring, "p2p": p2p, "mtp": mtp, "webrtc": webrtc,
@@ -373,17 +410,23 @@ def _cn(v):
 
 
 def build_workbook(spec, result, out_path):
-    n_fs, n_enc = len(spec["frame_sources"]), len(spec["encoders"])
-    fs_start = 46
-    fs_rows = list(range(fs_start, fs_start + n_fs))
-    enc_sec = fs_start + n_fs + 1
-    enc_hdr = enc_sec + 1
-    enc_start = enc_hdr + 1
-    enc_rows = list(range(enc_start, enc_start + n_enc))
-
     wb = Workbook()
+    feat = spec.get("features", {})
+    fx = spec["fixed"]
+    net = spec.get("network", {})
+    nt_raw = str(net.get("type", "wifi")).lower()
+    nt_display = {"wifi": "WiFi", "4g": "4G", "wifi+4g": "WiFi+4G",
+                  "none": "无（网络栈在对端 MCU/RTOS）"}.get(nt_raw, "WiFi")
+    bt = feat.get("bluetooth", {})
+    mtp = feat.get("mtp", {})
+    web = feat.get("webrtc", {})
+    na = feat.get("npu_algo", {})
+    sl = feat.get("slack", {})
+    media = spec.get("media") or {}
+    measured = is_measured(spec)
+    mblocks = media.get("blocks") or []
 
-    # ============ 说明 ============
+    # ==================== 说明 ====================
     ws = wb.active
     ws.title = "说明"
     ws.sheet_view.showGridLines = False
@@ -391,43 +434,101 @@ def build_workbook(spec, result, out_path):
         ws.column_dimensions[col].width = w
     title(ws, f"{spec.get('platform', 'T32Pro')} / {spec['project']} 内存预估工具", "I")
     ws.merge_cells("B2:I2")
-    put(ws, 2, 2, f"平台：{spec.get('platform', 'T32Pro')}；按分辨率、码率、缓存时长与连接数估算媒体管线 / SDK 内存；支持单摄与多摄（FS 按 sensor 分组）。", size=10)
+    put(ws, 2, 2, f"平台：{spec.get('platform', 'T32Pro')}；按五大块估算整机内存：RMEM / Linux 系统 / Linux 应用 / 算法 / 其他。", size=10)
     ws.row_dimensions[2].height = 30
 
-    section(ws, 4, "一、核心公式（单位：字节）", 9)
-    header(ws, 5, ["", "内存项", "公式", "", "", "", "", "", "说明"])
-    ws.merge_cells("C5:H5")
-    formulas = [
-        ("单帧 NV12", "F = W × H × 1.5", "4K 单帧 12,441,600 B"),
-        ("编码器配置", "分辨率 / 编码流数 / 编码器配置", "码率不进 VENC pool；码率只影响 ring"),
-        ("编码器 pool", "P = pool_a × F + pool_b", "只与分辨率/流数有关，与码率无关"),
-        ("IVDC 帧源 VB", "V = ivdc_mem_line × W × 1.5", "只分配行缓存，不分配整帧"),
-        ("普通帧源 VB", "V = nrVBs × F", "非 IVDC 通道"),
-        ("JPEG 抓拍 pool", "J = k_jpeg × F + overhead", "<项目B> 实测 832×480 = 609,536 B"),
-        ("ISP MDNS", "M_s = k_isp × max(F of sensor s)", "每个 sensor 独立一份"),
-        ("SDK 流缓存 ring", "R = ring 码率(kbps) × 128 × 缓存秒数", "libmike.a 反汇编坐实；ring 码率可不同于 VENC"),
-        ("P2P 缓冲", "B = 客户端 × (视频块 + 音频块×2)", "音频按收发双向"),
-        ("MTP SDK（可选）", "M = 固定 + 会话 × ((wnd_rcv+wnd_snd)×MTU + 开销)", "KCP 128/32/920；<项目B> 支持，实测优先"),
+    r = 3
+    section(ws, r, "一、内存构成与逐项口径（五大块）", 9); r += 1
+    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=9)
+    put(ws, r, 2, "F = 单帧 NV12 字节 = W × H × 1.5；1 MiB = 1,048,576 B。『经验值』的来源与历史取值见『速查表』附录，本项目实际取值与分项见『详细表』。", size=9)
+    r += 1
+    header(ws, r, ["", "块", "组成项", "公式 / 取值", "", "", "", "", "类型"])
+    ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=8)
+    for cc in range(5, 9):
+        ws.cell(row=r, column=cc).border = BORDER
+    r += 1
+    if measured:
+        media_items = [(b.get("name", "块"), f"实测（{b.get('group', '')}）：mma_heap_name0", "实测")
+                       for b in mblocks if b.get("group") != "算法"]
+        if spec.get("sdk_reserved"):
+            media_items.append(("SDK 预留块", "spec.sdk_reserved", "常量"))
+        media_items.append(("媒体堆容量 cap", "bootargs mma_heap=...,sz=；Linux 可见 = DRAM − cap", "配置值"))
+    else:
+        media_items = [
+            ("ISP MDNS", "k_isp × max(F of sensor s)", "公式"),
+            ("FS VB", "IVDC：ivdc_mem_line × W × 1.5；否则 nrVBs × W × H × 1.5", "公式"),
+            ("VENC pool", "pool_a × F + pool_b；H.264 再 × h264_factor", "公式"),
+            ("JPEG 抓拍", "k_jpeg × F + jpeg_overhead", "公式"),
+            ("SDK 预留块", "2 × 512,000 B（reuse=FREE）", "常量"),
+        ]
+    comp = [
+        ("1. RMEM", media_items),
+        ("2. Linux 系统", [
+            ("kernel", "历史实测基线（vmlinux 段复核）", "经验值"),
+            ("modules", "历史实测（/proc/modules 汇总）", "经验值"),
+            ("CMA（非算法）", "CONFIG_CMA_SIZE_MBYTES − NPU/算法", "配置值"),
+            ("slab", "仅 SUnreclaim，历史实测", "经验值"),
+            ("file cache", "squashfs 代码页，历史实测", "经验值"),
+            ("zram", "zsmalloc 压缩后，历史实测", "经验值"),
+        ]),
+        ("3. Linux 应用", [
+            ("流缓存 ring", "ring 码率(kbps) × 128 × 缓存秒数", "公式"),
+            ("音频 ring", "音频码率(kbps) × 128 × 秒 × 通道数", "公式"),
+            ("P2P", "clients × (视频块 × 块数 + 音频块 × 块数 × 2)", "公式＋经验块数"),
+            ("MTP", "fixed + sessions × ((wnd_rcv+wnd_snd) × MTU + overhead)", "公式"),
+            ("海外语控", "fixed + sessions × per_session（默认 1,024KB/会话）", "经验值"),
+            ("c_mi_ipc 基础 anon", "历史实测（smaps 残差）", "经验值"),
+            ("miio_client / miio_ot", "历史实测 RSS", "经验值"),
+        ]),
+        ("4. 算法", [
+            ("NPU 池", "init.sh cma_pool_size（4K 系列 3,584KB；双摄-1440p 系列 5,120KB）", "配置值"),
+            ("算法模型", "查 references/algo-models.md（常电人/车 1,229KB；双摄-1440p 系列已含池内）", "查表"),
+        ]),
+        ("5. 其他", [
+            ("other_procs", "历史实测（init / log / adbd / storage）", "经验值"),
+            ("网络", "WiFi：wpa_supplicant + udhcpc 实测 2,076KB；4G：supplicant 默认 512KB", "经验值"),
+            ("蓝牙", "miio_bt 868KB（4K 样机 实测）；内核模块在 modules 基线", "经验值"),
+        ]),
     ]
-    for r, (name, f, note) in enumerate(formulas, 6):
-        put(ws, r, 2, name, bold=True)
-        ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=8)
-        put(ws, r, 3, f, fill=GREY, align="center")
-        for cc in range(4, 9):
-            ws.cell(row=r, column=cc).border = BORDER
-        put(ws, r, 9, note)
-        ws.row_dimensions[r].height = 24
+    for block, items in comp:
+        b0 = r
+        for i, (item, formula, kind) in enumerate(items):
+            put(ws, r, 2, block if i == 0 else None, bold=True)
+            put(ws, r, 3, item)
+            ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=8)
+            put(ws, r, 4, formula)
+            for cc in range(5, 9):
+                ws.cell(row=r, column=cc).border = BORDER
+            put(ws, r, 9, kind, align="center")
+            ws.row_dimensions[r].height = 28
+            r += 1
+        ws.merge_cells(start_row=b0, start_column=2, end_row=r - 1, end_column=2)
+        ws.cell(row=b0, column=2).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-    section(ws, 16, "二、数据来源", 9)
+    r += 1
+    section(ws, r, "二、两本账与判定口径", 9); r += 1
+    rules = [
+        "两本账不相加：rmem 需求先从 DRAM 扣掉，Linux 可见 = DRAM − rmem；rmem 不能拿 Linux 余量补。",
+        "账面占用 = 五项合计；硬占用 = 五项合计 − file_cache（可回收）；判定看硬余量 = DRAM − 硬占用。",
+        "默认最大场景：常驻组件全在线 + 全流 + P2P 满客户端 + 缓存秒数取最大 + JPEG 抓拍瞬时。",
+        "单位统一 MiB（1,048,576 B）；对外说「MB」时按 1024 换算。",
+    ]
+    for s in rules:
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=9)
+        put(ws, r, 2, s)
+        ws.row_dimensions[r].height = 24
+        r += 1
+
+    r += 1
+    section(ws, r, "三、数据来源", 9); r += 1
     sources = [
         ("流参数", "项目 config.h + video_hal_config.h 的 PROJECT_<project> 分支"),
         ("SDK ring", "qwiki 20261016-c-mi-ipc-memory-profile.md §八（反汇编）"),
-        ("rmem 分项", "<项目B> 2026-11 continuous_mem_info（当前默认）；<项目A> 2026-06 28MB 场景为历史参考"),
+        ("rmem 分项", "4K-4G 2026-11 continuous_mem_info（当前默认）；4K-WiFi 2026-06 28MB 场景为历史参考"),
         ("JPEG pool", "qwiki 20261016-jpeg-snap-ondemand.md（607,360 B）"),
         ("P2P 参数", "mike_p2p.c（音频 32KB；视频发送块按像素档）"),
-        ("固定项基线", "项目内存卡片 / CLAUDE.md；无则用模板默认"),
+        ("经验值基线", "『速查表』附录·历史实测基线（kernel/modules/slab/cache/zram/网络/蓝牙等）"),
     ]
-    r = 17
     for k, v in sources:
         put(ws, r, 2, k, bold=True)
         ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=9)
@@ -436,546 +537,620 @@ def build_workbook(spec, result, out_path):
             ws.cell(row=r, column=cc).border = BORDER
         r += 1
 
-    section(ws, 24, "三、使用步骤", 9)
+    r += 1
+    section(ws, r, "四、使用步骤", 9); r += 1
     steps = [
-        "1. 在『输入参数』改分辨率/码率/nrVBs/IVDC/缓存/P2P；黄色格可编辑。",
-        "2. 看『内存估算』：rmem 按 sensor 分组，Linux 动态与固定项分开列。",
-        "3. 新项目/新构建：按『标定校验』采集实测，更新 pool_a / pool_b 与 fixed 基线。",
-        "4. 横比方案：看『速查表』。",
+        "1. 『输入详细』确认规格（黄色可改，备注列写明默认值来源）；FS/ENC 行数变化需重跑脚本。",
+        "2. 『详细表』逐项核对五大块，Linux 应用块按 c_mi_ipc 与 miio 分开展开。",
+        "3. 『汇总』看五项合计 / 账面预留 / 硬占用 / 硬余量 / 判定。",
+        "4. 横比方案看『速查表』主表；经验值与历史实测基线看附录；新项目按实测点重标。",
     ]
-    r = 25
     for s in steps:
         ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=9)
         put(ws, r, 2, s)
         r += 1
 
-    section(ws, 30, "四、口径与限制", 9)
+    r += 1
+    section(ws, r, "五、口径与限制", 9); r += 1
     caveats = [
-        "① 默认系数来自 <项目B> 2026-11 实测（T32Pro / isp_memopt=0x7）；<项目A> 2026-06 的 28MB 场景是历史参考。换项目仍须实机重标。",
+        "① 默认系数来自 4K-4G 2026-11 实测（T32Pro / isp_memopt=0x7）；4K-WiFi 2026-06 的 28MB 场景是历史参考。换项目仍须实机重标。",
         "② rmem 在 /proc/meminfo 不可见；用 impdbg 或 /tmp/continuous_mem_info 验证。",
         "③ 双摄/多摄：MDNS 按 sensor 分组，每组取该组最大帧；不要把单摄账直接乘 2，也不要把同组多个 FS 帧相加。",
-        "④ pool_a / pool_b 由同产品两档实测反解（4K+480P）；换产品族/分辨率需重标。旧式 k_recon/k_stream 仅作回退。",
-        "⑤ P2P 单 client 实测 1,028KB 视频 + 128KB 音频（估）；并发按 client 线性叠加。",
-        "⑥ 帧率 / GOP 不进内存公式（只影响 CPU 与码流波动）。",
-        "⑦ 两本账：账面 = 五项合计；硬占用 = 账面 − file_cache；判定看硬余量。Slab 只计 SUnreclaim；SReclaimable、Buffers、file-backed text 不计；zram 按压力上界计入硬账。",
-        "⑧ MTP 是小米 MTP SDK（KCP），不是 USB MTP；默认按 KCP 窗口估算，重要项目用 smaps 实测覆盖 B35。",
+        "④ 帧率 / GOP 不进内存公式（只影响 CPU 与码流波动）。",
+        "⑤ Slab 只计 SUnreclaim；SReclaimable、Buffers、file-backed text 不计；zram 按压力上界计入硬账。",
+        "⑥ MTP 是小米 MTP SDK（KCP），不是 USB MTP；重要项目用 smaps 实测覆盖公式值。",
     ]
-    r = 31
     for s in caveats:
         ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=9)
-        put(ws, r, 2, s, fill=RED if r == 31 else WHITE)
+        put(ws, r, 2, s)
         ws.row_dimensions[r].height = 30
         r += 1
 
-    # ============ 输入参数 ============
-    ws = wb.create_sheet("输入参数")
+    # ==================== 输入详细 ====================
+    ws = wb.create_sheet("输入详细")
     ws.sheet_view.showGridLines = False
-    for col, w in zip("ABCDEFGHIJ", [8, 22, 8, 8, 10, 10, 11, 11, 11, 28]):
+    for col, w in zip("ABCDEFGHIJ", [26, 14, 10, 10, 10, 10, 10, 10, 10, 28]):
         ws.column_dimensions[col].width = w
-    title(ws, "输入参数（黄色单元格可编辑）", "I")
-    ws.merge_cells("A2:I2")
-    put(ws, 2, 1, "改这里 → 『内存估算』自动重算；多摄时 FS 表的 Sensor 列填 0/1/…", size=9)
+    title(ws, "输入详细（黄色单元格可编辑；备注列为默认值来源）", "J")
+    ws.merge_cells("A2:J2")
+    put(ws, 2, 1, "常用项在前，标定系数/常量集中在最后一节；改黄色格 → 『详细表』『汇总』自动重算。", size=9)
 
-    section(ws, 4, "一、全局参数", 9)
-    header(ws, 5, ["参数", "值", "单位", "说明 / 来源"])
-    ws.merge_cells("D5:I5")
-    globals_ = [
-        (6, "流缓存时长", spec["buffer_seconds"], "s", "MIKE_STREAM_BUFFER_MAX_SECONDS"),
-        (7, "P2P 最大客户端数", spec["p2p"]["clients"], "个", "MAX_P2P_CLIENTS"),
-        (8, "P2P 视频发送块", spec["p2p"]["video_kb"], "KB", "推荐：8MP 1024KB，5MP 以下 512KB"),
-        (9, "P2P 音频块", spec["p2p"]["audio_kb"], "KB", "mike_p2p.c 推荐 32KB"),
-        (10, "P2P 每客户端音频块数", spec["p2p"]["audio_bufs"], "块", "估算：发送 + 接收"),
-        (11, "P2P 每客户端视频块数", spec["p2p"]["video_bufs"], "块", "估算"),
-        (12, "ivdc_mem_line", spec["ivdc_mem_line"], "行", "init.sh insmod tx-isp 参数"),
-        (13, "k_isp", spec["coefficients"]["k_isp"], "×单帧", "MDNS 系数；双摄每个 sensor 各乘一次"),
-        (14, "k_recon", spec["coefficients"]["k_recon"], "×单帧", "编码器重建帧系数（标定拟合）"),
-        (15, "k_stream", spec["coefficients"]["k_stream"], "×maxI", "编码器码流缓冲系数（标定拟合）"),
-        (16, "maxI 系数", spec["coefficients"]["maxi_factor"], "×码率", "maxIPictureSize = maxBitRate × 5/2"),
-        (17, "k_jpeg", spec["coefficients"]["k_jpeg"], "×单帧", "JPEG 码流缓冲系数"),
-        (18, "JPEG 固定开销", spec["coefficients"]["jpeg_overhead"], "B", "607,360 − 599,040"),
-        (19, "音频码率", spec["audio"]["bitrate"], "kbps", "MIKE_STREAM_AUDIO_BITRATE"),
-        (20, "音频通道数", spec["audio"]["channels"], "路", "音频 ring 路数"),
-        (21, "SDK 预留块", spec["sdk_reserved"], "B", "2 × 512,000 reuse=FREE"),
-        (22, "rmem 需求", "自动", "MB", "由 MDNS/FS VB/VENC/JPEG/SDK 自动计算，不做输入"),
-        (23, "总 DRAM", spec["dram_mb"], "MB", "硬件"),
-        (24, "1 MB", MIB, "B", "单位换算"),
-        (25, "h264_factor", spec["coefficients"].get("h264_factor", 1.22), "×H265模型", "H264 无 RFC，按 H265 模型乘此系数"),
-        (42, "pool_a", spec["coefficients"].get("pool_a", 0), "×单帧", "码率无关 pool 系数（与 pool_b 配对）；0 = 回退旧式 k_recon/k_stream"),
-        (43, "pool_b", spec["coefficients"].get("pool_b", 0), "B", "pool 固定项（B）"),
-    ]
-    for row, name, val, unit, note in globals_:
+    inp = {}
+
+    def add_param(row, key, name, value, unit, note, fmt=None):
+        inp[key] = row
         put(ws, row, 1, name, bold=True)
-        put(ws, row, 2, val, fmt="0.0000" if isinstance(val, float) else "#,##0", fill=YELLOW, align="center")
+        put(ws, row, 2, value, fmt=fmt, fill=YELLOW, align="center")
         put(ws, row, 3, unit, align="center")
-        ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=9)
+        ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=10)
         put(ws, row, 4, note)
-        for cc in range(5, 10):
+        for cc in range(5, 11):
             ws.cell(row=row, column=cc).border = BORDER
         ws.row_dimensions[row].height = 22
 
-    mtp = spec.get("features", {}).get("mtp", {})
-    section(ws, 27, "二、功能 SDK（MTP / WebRTC，可选）", 9)
-    header(ws, 28, ["参数", "值", "单位", "说明 / 来源"])
-    ws.merge_cells("D28:I28")
-    mtp_rows = [
-        (29, "启用 MTP", _cn(mtp.get("enabled")), "", "是/否；<项目B> 选是"),
-        (30, "MTP 会话数", mtp.get("sessions", 3), "个", "默认 max(3, P2P clients+1)"),
-        (31, "MTP 固定开销", mtp.get("fixed_kb", 128), "KB", "SDK 池/管理器"),
-        (32, "KCP wnd_rcv", mtp.get("wnd_rcv", 128), "段", "SDK 常量 MTP_IKCP_WND_RCV=128"),
-        (33, "KCP wnd_snd", mtp.get("wnd_snd", 32), "段", "SDK 常量 MTP_IKCP_WND_SND=32"),
-        (34, "KCP MTU", mtp.get("mtu_bytes", 920), "B", "SDK 常量 MTP_IKCP_MTU_DEF=920"),
-        (35, "MTP 每会话开销", mtp.get("overhead_kb_per_session", 64), "KB", "会话/MBuffer/加密等，估算"),
-        (36, "MTP 实测覆盖", mtp.get("measured_bytes", 0), "B", ">0 时优先于公式"),
-    ]
-    for row, name, val, unit, note in mtp_rows:
-        put(ws, row, 1, name, bold=True)
-        fmt = "#,##0" if isinstance(val, int) else "0"
-        put(ws, row, 2, val, fmt=fmt, fill=YELLOW, align="center")
-        put(ws, row, 3, unit, align="center")
-        ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=9)
-        put(ws, row, 4, note)
-        for cc in range(5, 10):
-            ws.cell(row=row, column=cc).border = BORDER
-        ws.row_dimensions[row].height = 22
-    dv_mtp = DataValidation(type="list", formula1='"是,否"', allow_blank=False)
-    ws.add_data_validation(dv_mtp); dv_mtp.add("B29")
+    def add_section(row, title_text):
+        section(ws, row, title_text, 10)
+        header(ws, row + 1, ["参数", "值", "单位", "说明 / 来源"])
+        ws.merge_cells(start_row=row + 1, start_column=4, end_row=row + 1, end_column=10)
+        for cc in range(5, 11):
+            ws.cell(row=row + 1, column=cc).border = BORDER
 
-    web = spec.get("features", {}).get("webrtc", {})
-    web_rows = [
-        (37, "启用 WebRTC", _cn(web.get("enabled")), "", "是/否；<项目C> B01 / HWYK 选是"),
-        (38, "WebRTC 会话数", web.get("sessions", 1), "个", "HWYK 独占 1 路"),
-        (39, "WebRTC 固定开销", web.get("fixed_kb", 128), "KB", "SDK/信令/初始化"),
-        (40, "每会话开销", web.get("per_session_kb", 1536), "KB", "ICE/DTLS/SCTP/RTP/jitter，估算"),
-        (41, "WebRTC 实测覆盖", web.get("measured_bytes", 0), "B", ">0 时优先于公式"),
-    ]
-    for row, name, val, unit, note in web_rows:
-        put(ws, row, 1, name, bold=True)
-        put(ws, row, 2, val, fmt="#,##0", fill=YELLOW, align="center")
-        put(ws, row, 3, unit, align="center")
-        ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=9)
-        put(ws, row, 4, note)
-        for cc in range(5, 10):
-            ws.cell(row=row, column=cc).border = BORDER
-        ws.row_dimensions[row].height = 22
-    dv_web = DataValidation(type="list", formula1='"是,否"', allow_blank=False)
-    ws.add_data_validation(dv_web); dv_web.add("B37")
+    # ---- 一、视频与连接（常用） ----
+    r = 4
+    add_section(r, "一、视频与连接（常用）"); r += 2
+    for key, name, val, unit, note, fmt in [
+        ("BUF_SEC", "流缓存时长", spec["buffer_seconds"], "s", "MIKE_STREAM_BUFFER_MAX_SECONDS", "0"),
+        ("P2P_CLIENTS", "P2P 最大客户端数", spec["p2p"]["clients"], "个", "MAX_P2P_CLIENTS", "0"),
+        ("P2P_VID_KB", "P2P 视频发送块", spec["p2p"]["video_kb"], "KB", "8MP 1024KB，5MP 以下 512KB", "#,##0"),
+        ("P2P_VID_BUFS", "每客户端视频块数", spec["p2p"].get("video_bufs", 1), "块", "估算，通常 1", "0"),
+        ("P2P_AUD_KB", "P2P 音频块", spec["p2p"]["audio_kb"], "KB", "mike_p2p.c 推荐 32KB", "#,##0"),
+        ("P2P_AUD_BUFS", "每客户端音频块数", spec["p2p"]["audio_bufs"], "块", "发送 + 接收，通常 2", "0"),
+        ("AUDIO_KBPS", "音频码率", spec["audio"]["bitrate"], "kbps", "MIKE_STREAM_AUDIO_BITRATE", "#,##0"),
+        ("AUDIO_CH", "音频通道数", spec["audio"]["channels"], "路", "音频 ring 路数", "0"),
+        ("DRAM_MB", "总 DRAM", spec["dram_mb"], "MB", "硬件", "0"),
+    ]:
+        add_param(r, key, name, val, unit, note, fmt)
+        r += 1
 
-    section(ws, 44, "三、帧源通道 FrameSource / VB（sensor 分组）", 9)
-    header(ws, 45, ["启用", "名称", "Sensor", "宽 W", "高 H", "nrVBs", "IVDC直通", "备注"])
-    ws.merge_cells("H45:I45")
-    for i, r in enumerate(fs_rows):
-        x = spec["frame_sources"][i]
-        put(ws, r, 1, _cn(x.get("enabled")), fill=YELLOW, align="center")
-        put(ws, r, 2, x.get("name", ""), bold=True)
-        put(ws, r, 3, int(x.get("sensor", 0)), fmt="0", fill=YELLOW, align="center")
-        put(ws, r, 4, x.get("w", 0), fmt="#,##0", fill=YELLOW, align="center")
-        put(ws, r, 5, x.get("h", 0), fmt="#,##0", fill=YELLOW, align="center")
-        put(ws, r, 6, x.get("nrvbs", 0), fmt="0", fill=YELLOW, align="center")
-        put(ws, r, 7, _cn(x.get("ivdc")), fill=YELLOW, align="center")
-        ws.merge_cells(start_row=r, start_column=8, end_row=r, end_column=9)
-        put(ws, r, 8, "IVDC：VB = ivdc_mem_line × W × 1.5" if x.get("ivdc") else "VB = nrVBs × W × H × 1.5")
-        ws.cell(row=r, column=9).border = BORDER
+    # ---- 二/三、媒体侧输入 ----
+    fs_rows, enc_rows = [], []
+    if measured:
+        r += 1
+        section(ws, r, "二、媒体内存块（SigmaStar：mma_heap_name0 实测，单位字节）", 10); r += 1
+        header(ws, r, ["分组", "名称", "", "", "字节", "", "", "备注", "", ""]); r += 1
+        ws.merge_cells(start_row=r - 1, start_column=2, end_row=r - 1, end_column=4)
+        ws.merge_cells(start_row=r - 1, start_column=5, end_row=r - 1, end_column=7)
+        ws.merge_cells(start_row=r - 1, start_column=8, end_row=r - 1, end_column=10)
+        for cc in (3, 4, 6, 7, 9, 10):
+            ws.cell(row=r - 1, column=cc).border = BORDER
+        for i, b in enumerate(mblocks):
+            rr = r
+            put(ws, rr, 1, b.get("group", ""), fill=YELLOW, align="center")
+            ws.merge_cells(start_row=rr, start_column=2, end_row=rr, end_column=4)
+            put(ws, rr, 2, b.get("name", f"block{i}"), bold=True)
+            ws.merge_cells(start_row=rr, start_column=5, end_row=rr, end_column=7)
+            put(ws, rr, 5, b.get("bytes", 0), fmt="#,##0", fill=YELLOW, align="center")
+            ws.merge_cells(start_row=rr, start_column=8, end_row=rr, end_column=10)
+            put(ws, rr, 8, b.get("note", ""), size=8)
+            for cc in (3, 4, 6, 7, 9, 10):
+                ws.cell(row=rr, column=cc).border = BORDER
+            ws.row_dimensions[rr].height = 22
+            r += 1
+        media_cap_row = r
+        add_param(r, "MEDIA_CAP", "媒体堆容量 cap", media.get("cap_bytes", 0), "B",
+                  "bootargs mma_heap=...,sz=；Linux 可见 = DRAM − cap", "#,##0")
+        r += 1
+        r += 1
+        section(ws, r, "三、编码通道", 10); r += 1
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
+        put(ws, r, 1, "SigmaStar 路径不按分辨率推 VENC pool：编码器/帧源/ISP 内存已由上面的实测块覆盖（改规格请重采 mma_heap_name0 并重跑脚本）。", size=9)
+        ws.row_dimensions[r].height = 26
+        r += 2
+    else:
+        r += 1
+        section(ws, r, "二、帧源通道 FrameSource / VB（sensor 分组）", 10); r += 1
+        header(ws, r, ["启用", "名称", "Sensor", "宽 W", "高 H", "nrVBs", "IVDC直通", "备注"]); r += 1
+        ws.merge_cells(start_row=r - 1, start_column=8, end_row=r - 1, end_column=10)
+        for cc in (9, 10):
+            ws.cell(row=r - 1, column=cc).border = BORDER
+        fs_rows = list(range(r, r + len(spec["frame_sources"])))
+        for i, rr in enumerate(fs_rows):
+            x = spec["frame_sources"][i]
+            put(ws, rr, 1, _cn(x.get("enabled")), fill=YELLOW, align="center")
+            put(ws, rr, 2, x.get("name", ""), bold=True)
+            put(ws, rr, 3, int(x.get("sensor", 0)), fmt="0", fill=YELLOW, align="center")
+            put(ws, rr, 4, x.get("w", 0), fmt="#,##0", fill=YELLOW, align="center")
+            put(ws, rr, 5, x.get("h", 0), fmt="#,##0", fill=YELLOW, align="center")
+            put(ws, rr, 6, x.get("nrvbs", 0), fmt="0", fill=YELLOW, align="center")
+            put(ws, rr, 7, _cn(x.get("ivdc")), fill=YELLOW, align="center")
+            ws.merge_cells(start_row=rr, start_column=8, end_row=rr, end_column=10)
+            put(ws, rr, 8, "IVDC：VB = ivdc_mem_line × W × 1.5" if x.get("ivdc") else "VB = nrVBs × W × H × 1.5")
+            for cc in (9, 10):
+                ws.cell(row=rr, column=cc).border = BORDER
+            ws.row_dimensions[rr].height = 22
+        r = fs_rows[-1] + 2
+
+        # ---- 三、编码通道 ----
+        section(ws, r, "三、编码通道（VENC 码率与 SDK ring 码率分开填）", 10); r += 1
+        header(ws, r, ["启用", "名称", "Sensor", "类型", "宽 W", "高 H", "VENC kbps", "ring kbps", "流缓存 ring", "备注"]); r += 1
+        enc_rows = list(range(r, r + len(spec["encoders"])))
+        for i, rr in enumerate(enc_rows):
+            x = spec["encoders"][i]
+            put(ws, rr, 1, _cn(x.get("enabled")), fill=YELLOW, align="center")
+            put(ws, rr, 2, x.get("name", ""), bold=True)
+            put(ws, rr, 3, int(x.get("sensor", 0)), fmt="0", fill=YELLOW, align="center")
+            put(ws, rr, 4, x.get("type", "H265"), fill=YELLOW, align="center")
+            put(ws, rr, 5, x.get("w", 0), fmt="#,##0", fill=YELLOW, align="center")
+            put(ws, rr, 6, x.get("h", 0), fmt="#,##0", fill=YELLOW, align="center")
+            put(ws, rr, 7, x.get("bitrate", 0), fmt="#,##0", fill=YELLOW, align="center")
+            put(ws, rr, 8, x.get("ring_bitrate", x.get("bitrate", 0)), fmt="#,##0", fill=YELLOW, align="center")
+            put(ws, rr, 9, _cn(x.get("ring")), fill=YELLOW, align="center")
+            default = "JPEG 按需建拆则稳态不计" if str(x.get("type", "")).upper() == "JPEG" else ""
+            put(ws, rr, 10, x.get("note", default))
+            ws.row_dimensions[rr].height = 22
+        r = enc_rows[-1] + 2
+
+    # ---- 四、网络与蓝牙 ----
+    add_section(r, "四、网络与蓝牙"); r += 2
+    for key, name, val, unit, note, fmt in [
+        ("NET_TYPE", "网络类型", nt_display, "", "WiFi / 4G / WiFi+4G / 无（网络在对端 RTOS）", None),
+        ("NET_WIFI_KB", "WiFi supplicant", net.get("wifi_supplicant_kb", 0), "KB", "wpa_supplicant + udhcpc；4K 样机 实测 2,076KB", "#,##0"),
+        ("NET_LTE_KB", "4G supplicant", net.get("lte_supplicant_kb", 0), "KB", "4G 机型选填，默认 512", "#,##0"),
+        ("NET_LTE_MOD_KB", "4G 模块预留", net.get("lte_module_kb", 0), "KB", "驱动/固件预留", "#,##0"),
+        ("BT_ENABLED", "启用蓝牙", _cn(bt.get("enabled")), "", "AIC8800 机型", None),
+        ("BT_USER_KB", "蓝牙用户态", bt.get("userspace_kb", 868), "KB", "miio_bt；内核模块在 modules 基线", "#,##0"),
+    ]:
+        add_param(r, key, name, val, unit, note, fmt)
+        r += 1
+
+    # ---- 五、MTP / 海外语控 ----
+    r += 1
+    add_section(r, "五、MTP / 海外语控（可选）"); r += 2
+    for key, name, val, unit, note, fmt in [
+        ("MTP_ENABLED", "启用 MTP", _cn(mtp.get("enabled")), "", "是/否；4K-4G 选是", None),
+        ("MTP_SESSIONS", "MTP 会话数", mtp.get("sessions", 3), "个", "默认 max(3, P2P clients+1)", "0"),
+        ("MTP_FIXED_KB", "MTP 固定开销", mtp.get("fixed_kb", 128), "KB", "SDK 池/管理器", "#,##0"),
+        ("MTP_MEASURED", "MTP 实测覆盖", mtp.get("measured_bytes", 0), "B", ">0 时优先于公式", "#,##0"),
+        ("WEBRTC_ENABLED", "启用海外语控", _cn(web.get("enabled")), "", "WebRTC / Alexa / Google 统称", None),
+        ("WEBRTC_SESSIONS", "语控会话数", web.get("sessions", 1), "个", "HWYK 独占 1 路", "0"),
+        ("WEBRTC_FIXED_KB", "语控固定开销", web.get("fixed_kb", 128), "KB", "SDK/信令/初始化", "#,##0"),
+        ("WEBRTC_PER_SESSION_KB", "每会话开销", web.get("per_session_kb", 1024), "KB", "ICE/DTLS/SCTP/RTP/jitter，估算", "#,##0"),
+        ("WEBRTC_MEASURED", "语控实测覆盖", web.get("measured_bytes", 0), "B", ">0 时优先于公式", "#,##0"),
+    ]:
+        add_param(r, key, name, val, unit, note, fmt)
+        r += 1
+
+    # ---- 六、NPU 与算法 ----
+    r += 1
+    add_section(r, "六、NPU 与算法"); r += 2
+    for key, name, val, unit, note, fmt in [
+        ("NPU_POOL_KB", "NPU 池", na.get("npu_pool_kb", 0), "KB", "init.sh cma_pool_size（4K-WiFi 4MB / 4K-4G 3.5MB）", "#,##0"),
+        ("ALGO_MODEL_KB", "算法模型", na.get("algo_model_kb", 0), "KB", "查 references/algo-models.md 登记表", "#,##0"),
+        ("NPU_IN_CMA", "含在 CMA", _cn(na.get("inside_cma", True)), "", "是：算法与 CMA 不双算；否：单独加", None),
+    ]:
+        add_param(r, key, name, val, unit, note, fmt)
+        r += 1
+
+    # ---- 七、固定项基线 ----
+    r += 1
+    add_section(r, "七、固定项基线（历史实测；单位字节）"); r += 2
+    parts = fx.get("parts", {})
+
+    def add_fixed(key, name, note):
+        nonlocal r
+        plist = parts.get(key, []) if key in ("kernel", "modules") else []
+        if not plist:
+            add_param(r, "FIX_" + key.upper(), name, fx.get(key, 0), "B", note, "#,##0")
+            r += 1
+            return
+        first = r
+        for i, part in enumerate(plist):
+            add_param(r, f"FIX_{key.upper()}_P{i}", "· " + part["name"], part["bytes"], "B",
+                      part.get("note", "构建产物段大小（不含 init/exit）"), "#,##0")
+            ws.row_dimensions[r].outlineLevel = 1
+            put(ws, r, 1, "· " + part["name"], bold=False)
+            r += 1
+        inp["FIX_" + key.upper()] = r
+        put(ws, r, 1, name + " 合计", bold=True)
+        put(ws, r, 2, f"=SUM(B{first}:B{r - 1})", fmt="#,##0", fill=GREY, align="center")
+        put(ws, r, 3, "B", align="center")
+        ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=10)
+        put(ws, r, 4, note)
+        for cc in range(5, 11):
+            ws.cell(row=r, column=cc).border = BORDER
         ws.row_dimensions[r].height = 22
-
-    section(ws, enc_sec, "四、编码通道（VENC 码率与 SDK ring 码率分开填）", 9)
-    header(ws, enc_hdr, ["启用", "名称", "Sensor", "类型", "宽 W", "高 H", "VENC kbps", "ring kbps", "流缓存 ring", "备注"])
-    for i, r in enumerate(enc_rows):
-        x = spec["encoders"][i]
-        put(ws, r, 1, _cn(x.get("enabled")), fill=YELLOW, align="center")
-        put(ws, r, 2, x.get("name", ""), bold=True)
-        put(ws, r, 3, int(x.get("sensor", 0)), fmt="0", fill=YELLOW, align="center")
-        put(ws, r, 4, x.get("type", "H265"), fill=YELLOW, align="center")
-        put(ws, r, 5, x.get("w", 0), fmt="#,##0", fill=YELLOW, align="center")
-        put(ws, r, 6, x.get("h", 0), fmt="#,##0", fill=YELLOW, align="center")
-        put(ws, r, 7, x.get("bitrate", 0), fmt="#,##0", fill=YELLOW, align="center")
-        put(ws, r, 8, x.get("ring_bitrate", x.get("bitrate", 0)), fmt="#,##0", fill=YELLOW, align="center")
-        put(ws, r, 9, _cn(x.get("ring")), fill=YELLOW, align="center")
-        default = "JPEG 按需建拆则稳态不计" if str(x.get("type", "")).upper() == "JPEG" else ""
-        put(ws, r, 10, x.get("note", default))
-        ws.row_dimensions[r].height = 22
-
-    dv = DataValidation(type="list", formula1='"是,否"', allow_blank=False)
-    ws.add_data_validation(dv)
-    for rng in (f"A{fs_rows[0]}:A{fs_rows[-1]}", f"G{fs_rows[0]}:G{fs_rows[-1]}",
-                f"A{enc_rows[0]}:A{enc_rows[-1]}", f"I{enc_rows[0]}:I{enc_rows[-1]}"):
-        dv.add(rng)
-    dv2 = DataValidation(type="list", formula1='"H265,H264,JPEG"', allow_blank=False)
-    ws.add_data_validation(dv2)
-    dv2.add(f"D{enc_rows[0]}:D{enc_rows[-1]}")
-
-    for name, ref in {
-        "BUF_SEC": "$B$6", "P2P_CLIENTS": "$B$7", "P2P_VID_KB": "$B$8", "P2P_AUD_KB": "$B$9",
-        "P2P_AUD_BUFS": "$B$10", "P2P_VID_BUFS": "$B$11", "IVDC_LINE": "$B$12",
-        "K_ISP": "$B$13", "K_RECON": "$B$14", "K_STREAM": "$B$15", "MAXI_FACTOR": "$B$16",
-        "K_JPEG": "$B$17", "JPEG_OVERHEAD": "$B$18", "AUDIO_KBPS": "$B$19", "AUDIO_CH": "$B$20",
-        "SDK_RESERVED": "$B$21", "DRAM_MB": "$B$23", "BYTES_PER_MB": "$B$24",
-        "H264_FACTOR": "$B$25",
-        "POOL_A": "$B$42", "POOL_B": "$B$43",
-        "MTP_ENABLED": "$B$29", "MTP_SESSIONS": "$B$30", "MTP_FIXED_KB": "$B$31",
-        "MTP_WND_RCV": "$B$32", "MTP_WND_SND": "$B$33", "MTP_MTU": "$B$34",
-        "MTP_OVERHEAD_KB": "$B$35", "MTP_MEASURED": "$B$36",
-        "WEBRTC_ENABLED": "$B$37", "WEBRTC_SESSIONS": "$B$38", "WEBRTC_FIXED_KB": "$B$39",
-        "WEBRTC_PER_SESSION_KB": "$B$40", "WEBRTC_MEASURED": "$B$41",
-    }.items():
-        wb.defined_names.add(DefinedName(name, attr_text=f"'输入参数'!{ref}"))
-
-    # ============ 内存估算 ============
-    ws = wb.create_sheet("内存估算")
-    ws.sheet_view.showGridLines = False
-    for col, w in zip("ABCDE", [30, 62, 16, 12, 32]):
-        ws.column_dimensions[col].width = w
-    title(ws, "内存估算结果（公式自动计算）", "E")
-    ws.merge_cells("A2:E2")
-    put(ws, 2, 1, "rmem 与 Linux 是两本独立账；rmem 超出不能拿 Linux 余量补。", size=9)
-
-    section(ws, 3, "一、媒体保留区 rmem（分辨率主导，MDNS 按 sensor 分组）", 5)
-    header(ws, 4, ["项目", "计算依据", "字节", "MB", "备注"])
-    r = 5
-
-    sensors = list(result["rmem"]["mdns_by_sensor"].keys())
-    for s in sensors:
-        terms = ",".join(
-            f"IF(AND('输入参数'!$A${x}=\"是\",'输入参数'!$C${x}={s}),"
-            f"'输入参数'!$D${x}*'输入参数'!$E${x}*1.5,0)"
-            for x in fs_rows
-        )
-        put(ws, r, 1, f"ISP MDNS · Sensor {s}", bold=True)
-        put(ws, r, 2, "k_isp × 该 sensor 的最大帧字节")
-        put(ws, r, 3, f"=K_ISP*MAX({terms})", fmt="#,##0", fill=GREY)
-        put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-        put(ws, r, 5, "每 sensor 一份，不是全机一份")
         r += 1
 
-    fs_vb_rows = []
-    for i, x in enumerate(fs_rows):
-        fs_vb_rows.append(r)
-        name = spec["frame_sources"][i].get("name", f"FS{i}")
-        put(ws, r, 1, f"{name} VB", bold=True)
-        put(ws, r, 2, "IVDC：ivdc_mem_line×W×1.5；否则 nrVBs×W×H×1.5")
-        put(ws, r, 3, f"=IF('输入参数'!$A${x}=\"否\",0,IF('输入参数'!$G${x}=\"是\","
-                      f"IVDC_LINE*'输入参数'!$D${x}*1.5,"
-                      f"'输入参数'!$F${x}*'输入参数'!$D${x}*'输入参数'!$E${x}*1.5))",
-            fmt="#,##0", fill=GREY)
-        put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-        put(ws, r, 5, f"Sensor {spec['frame_sources'][i].get('sensor', 0)}")
-        r += 1
-
-    for i, x in enumerate(enc_rows):
-        put(ws, r, 1, f"{spec['encoders'][i].get('name', f'enc{i}')} VENC pool", bold=True)
-        put(ws, r, 2, "JPEG：k_jpeg×F+overhead；否则 pool_a×F+pool_b（码率无关），pool_a=0 时回退 k_recon/k_stream")
-        put(ws, r, 3, f"=IF('输入参数'!$A${x}=\"否\",0,IF('输入参数'!$D${x}=\"JPEG\","
-                      f"K_JPEG*'输入参数'!$E${x}*'输入参数'!$F${x}*1.5+JPEG_OVERHEAD,"
-                      f"IF(POOL_A>0,"
-                      f"(POOL_A*'输入参数'!$E${x}*'输入参数'!$F${x}*1.5+POOL_B)*"
-                      f"IF('输入参数'!$D${x}=\"H264\",H264_FACTOR,1),"
-                      f"(K_RECON*'输入参数'!$E${x}*'输入参数'!$F${x}*1.5+"
-                      f"K_STREAM*('输入参数'!$G${x}*MAXI_FACTOR*1000/8))*"
-                      f"IF('输入参数'!$D${x}=\"H264\",H264_FACTOR,1))))",
-            fmt="#,##0", fill=GREY)
-        put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-        put(ws, r, 5, f"Sensor {spec['encoders'][i].get('sensor', 0)}")
-        r += 1
-
-    put(ws, r, 1, "SDK 预留块", bold=True)
-    put(ws, r, 2, "2 × 512,000 B（reuse=FREE）")
-    put(ws, r, 3, "=SDK_RESERVED", fmt="#,##0", fill=GREY)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-    r += 1
-
-    rmem_first = 5
-    rmem_subtotal = r
-    put(ws, r, 1, "rmem 估算合计", bold=True)
-    put(ws, r, 2, f"SUM(C{rmem_first}:C{r-1})")
-    put(ws, r, 3, f"=SUM(C{rmem_first}:C{r-1})", fmt="#,##0", fill=GREEN, bold=True)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREEN, bold=True)
-    put(ws, r, 5, "")
-    suggest_row = r + 1
-    put(ws, suggest_row, 1, "建议 rmem carve-out", bold=True)
-    put(ws, suggest_row, 2, "rmem 需求向上取整到 1MB；直接写 bootargs")
-    put(ws, suggest_row, 3, f"=CEILING(C{rmem_subtotal}/BYTES_PER_MB,1)", fmt="0.00", fill=GREEN)
-    put(ws, suggest_row, 4, "MB", align="center")
-    put(ws, suggest_row, 5, "rmem 由管线计算，不做输入")
-    r = suggest_row + 2
-    section(ws, r, "二、Linux 侧动态内存（码率 / 连接数主导）", 5); r += 1
-    header(ws, r, ["项目", "计算依据", "字节", "MB", "备注"]); r += 1
-    linux_first = r
-    for i, x in enumerate(enc_rows):
-        put(ws, r, 1, f"{spec['encoders'][i].get('name', f'enc{i}')} 流缓存 ring", bold=True)
-        put(ws, r, 2, "码率 × 128 × 缓存秒数（启用且勾 ring、非 JPEG）")
-        put(ws, r, 3, f"=IF(AND('输入参数'!$A${x}=\"是\",'输入参数'!$I${x}=\"是\","
-                      f"'输入参数'!$D${x}<>\"JPEG\"),'输入参数'!$H${x}*128*BUF_SEC,0)",
-            fmt="#,##0", fill=GREY)
-        put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-        put(ws, r, 5, "SDK 堆，开机一次性 calloc")
-        r += 1
-    put(ws, r, 1, "音频流缓存 ring", bold=True)
-    put(ws, r, 2, "音频码率 × 128 × 缓存秒数 × 通道数")
-    put(ws, r, 3, "=AUDIO_KBPS*128*BUF_SEC*AUDIO_CH", fmt="#,##0", fill=GREY)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-    r += 1
-    put(ws, r, 1, "P2P 收发缓冲", bold=True)
-    put(ws, r, 2, "客户端 ×（视频块×块数 + 音频块×块数×2）")
-    put(ws, r, 3, "=P2P_CLIENTS*(P2P_VID_KB*1024*P2P_VID_BUFS+P2P_AUD_KB*1024*P2P_AUD_BUFS*2)",
-        fmt="#,##0", fill=GREY)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-    put(ws, r, 5, "块数为估计值，需实测")
-    r += 1
-    put(ws, r, 1, "MTP SDK（可选）", bold=True)
-    put(ws, r, 2, "固定 + sessions × ((wnd_rcv+wnd_snd)×MTU + 每会话开销)")
-    put(ws, r, 3, "=IF(MTP_ENABLED=\"否\",0,IF(MTP_MEASURED>0,MTP_MEASURED,"
-                  "MTP_FIXED_KB*1024+MTP_SESSIONS*((MTP_WND_RCV+MTP_WND_SND)*MTP_MTU+MTP_OVERHEAD_KB*1024)))",
-        fmt="#,##0", fill=GREY)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-    put(ws, r, 5, "KCP 窗口估算；有实测填 B36")
-    r += 1
-    put(ws, r, 1, "海外语控 SDK（WebRTC）", bold=True)
-    put(ws, r, 2, "固定 + 会话数 × 每会话开销")
-    put(ws, r, 3, "=IF(WEBRTC_ENABLED=\"否\",0,IF(WEBRTC_MEASURED>0,WEBRTC_MEASURED,"
-                  "WEBRTC_FIXED_KB*1024+WEBRTC_SESSIONS*WEBRTC_PER_SESSION_KB*1024))",
-        fmt="#,##0", fill=GREY)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-    put(ws, r, 5, "统称 WebRTC/Alexa/Google；有实测填 B41")
-    r += 1
-    net = spec.get("network", {})
-    net_bytes = 0
-    nt = str(net.get("type", "wifi")).lower()
-    if nt in ("wifi", "wifi+4g"):
-        net_bytes += net.get("wifi_supplicant_kb", 0) * 1024
-    if nt in ("4g", "wifi+4g"):
-        net_bytes += (net.get("lte_supplicant_kb", 0) + net.get("lte_module_kb", 0)) * 1024
-    if net_bytes:
-        put(ws, r, 1, "网络（WiFi/4G）", bold=True)
-        put(ws, r, 2, "wpa_supplicant / LTE supplicant / 模块（spec 配置）")
-        put(ws, r, 3, net_bytes, fmt="#,##0", fill=GREY)
-        put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-        put(ws, r, 5, "WiFi 机型填 wifi_supplicant_kb，未填按 0 计")
-        r += 1
-    bt = spec.get("features", {}).get("bluetooth", {})
-    if bt.get("enabled"):
-        put(ws, r, 1, "蓝牙用户态", bold=True)
-        put(ws, r, 2, "miio_bt 等；内核 bluetooth.ko/aic_btusb 在 fixed.modules")
-        put(ws, r, 3, bt.get("userspace_kb", 868) * 1024, fmt="#,##0", fill=GREY)
-        put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-        put(ws, r, 5, "<参考机> 实测 868KB")
-        r += 1
-    sl = spec.get("features", {}).get("slack", {})
-    if float(sl.get("extra_threads", 0)) > 0:
-        put(ws, r, 1, "新增线程栈", bold=True)
-        put(ws, r, 2, "新增线程数 × 每线程栈（物理触底）")
-        put(ws, r, 3, float(sl["extra_threads"]) * float(sl.get("thread_stack_kb", 64)) * 1024, fmt="#,##0", fill=GREY)
-        put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-        put(ws, r, 5, "常见配置 64KB/线程；基准线程已含在 app_base")
-        r += 1
-    linux_subtotal = r
-    put(ws, r, 1, "Linux 动态合计", bold=True)
-    put(ws, r, 2, f"SUM(C{linux_first}:C{r-1})")
-    put(ws, r, 3, f"=SUM(C{linux_first}:C{r-1})", fmt="#,##0", fill=GREEN, bold=True)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREEN, bold=True)
-
-    r = linux_subtotal + 2
-    section(ws, r, "三、固定 / 平台项（历史实测基线，可编辑）", 5); r += 1
-    header(ws, r, ["项目", "说明", "字节", "MB", "口径"]); r += 1
-    fixed_labels = [
-        ("kernel", "内核代码+数据", "text/data/bss/init"),
-        ("modules", "内核模块", "tx-isp + WiFi + 其它"),
+    for key, name, note in [
+        ("kernel", "kernel", "内核代码+数据（text/rodata/data/bss + 页表/栈/余量）"),
+        ("modules", "modules", "已加载 .ko 段大小合计（不含 init/exit）"),
         ("cma", "CMA / TNPU", "CONFIG_CMA_SIZE_MBYTES"),
-        ("slab", "Slab（SUnreclaim）", "内核 slab 经验值；可回收部分不计"),
+        ("slab", "slab", "仅 SUnreclaim 经验值；可回收部分不计"),
         ("app_base", "c_mi_ipc 基础 anon", "不含 ring/P2P 的堆与栈"),
-        ("miio_client", "miio_client 进程", "独立 IoT 客户端 RSS"),
-        ("miio_ot", "miio_ot 进程", "如有独立进程，按实测 RSS"),
+        ("miio_client", "miio_client", "独立 IoT 客户端 RSS"),
+        ("miio_ot", "miio_ot", "如有独立进程，按实测 RSS"),
         ("other_procs", "其他进程", "init/log/adbd/storage"),
         ("file_cache", "file cache", "squashfs 代码页，可回收"),
         ("zram", "zram 实际占用", "zsmalloc 压缩后"),
-    ]
-    fixed_first = r
-    for key, label, note in fixed_labels:
-        put(ws, r, 1, label, bold=True)
-        put(ws, r, 2, note)
-        put(ws, r, 3, spec["fixed"].get(key, 0), fmt="#,##0", fill=YELLOW)
-        put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-        put(ws, r, 5, "可编辑")
+    ]:
+        add_fixed(key, name, note)
+
+    # ---- 八、新增线程 ----
+    r += 1
+    add_section(r, "八、新增线程（可选）"); r += 2
+    for key, name, val, unit, note, fmt in [
+        ("EXTRA_THREADS", "新增线程数", sl.get("extra_threads", 0), "个", "基准线程栈已含在基础 anon，不要重复加", "0"),
+        ("THREAD_STACK_KB", "每线程栈", sl.get("thread_stack_kb", 64), "KB", "常见配置 64KB", "#,##0"),
+    ]:
+        add_param(r, key, name, val, unit, note, fmt)
         r += 1
-    fixed_subtotal = r
-    put(ws, r, 1, "固定项合计", bold=True)
-    put(ws, r, 2, f"SUM(C{fixed_first}:C{r-1})")
-    put(ws, r, 3, f"=SUM(C{fixed_first}:C{r-1})", fmt="#,##0", fill=GREEN, bold=True)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREEN, bold=True)
 
-    r = fixed_subtotal + 2
-    section(ws, r, "四、汇总与预算判断", 5); r += 1
-    header(ws, r, ["项目", "计算依据", "字节", "MB", "判定"]); r += 1
-    summary_first = r
-    put(ws, r, 1, "媒体 rmem 估算", bold=True); put(ws, r, 2, "rmem 小计")
-    put(ws, r, 3, f"=C{rmem_subtotal}", fmt="#,##0", fill=GREY)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY); r += 1
-    put(ws, r, 1, "Linux 动态", bold=True); put(ws, r, 2, "Linux 动态小计")
-    put(ws, r, 3, f"=C{linux_subtotal}", fmt="#,##0", fill=GREY)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY); r += 1
-    put(ws, r, 1, "Linux 固定项", bold=True); put(ws, r, 2, "固定项小计")
-    put(ws, r, 3, f"=C{fixed_subtotal}", fmt="#,##0", fill=GREY)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY); r += 1
-    linux_total_row = r
-    put(ws, r, 1, "Linux 合计", bold=True); put(ws, r, 2, "动态 + 固定")
-    put(ws, r, 3, f"=C{r-2}+C{r-1}", fmt="#,##0", fill=GREY)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY); r += 1
-    visible_row = r
-    put(ws, r, 1, "Linux 可见", bold=True); put(ws, r, 2, "总 DRAM − rmem 需求")
-    put(ws, r, 3, f"=DRAM_MB*BYTES_PER_MB-C{rmem_subtotal}", fmt="#,##0", fill=GREY)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY); r += 1
-    linux_margin_row = r
-    put(ws, r, 1, "Linux 余量", bold=True); put(ws, r, 2, "可见 − 合计")
-    put(ws, r, 3, f"=C{visible_row}-C{linux_total_row}", fmt="#,##0", fill=GREY)
-    put(ws, r, 4, f"=C{r}/BYTES_PER_MB", fmt="0.00", fill=GREY); r += 1
-    put(ws, r, 1, "判定 · Linux", bold=True); put(ws, r, 2, "Linux 合计 ≤ 可见？")
-    put(ws, r, 3, f"=IF(C{linux_total_row}<=C{visible_row},\"OK\",\"超支\")", fill=GREY); r += 1
-    put(ws, r, 1, "结论（Linux）", bold=True)
-    put(ws, r, 2, f"=IF(C{linux_total_row}<=C{visible_row},"
-                  f"\"✅ Linux 预算可行；最终预留见『系统汇总』\","
-                  f"\"⚠️ Linux 超支 \"&TEXT((C{linux_total_row}-C{visible_row})/BYTES_PER_MB,\"0.00\")&\" MB\")", bold=True)
-    ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=5)
-    ws.row_dimensions[r].height = 28
+    # ---- 九、标定系数与常量（高级） ----
+    r += 1
+    add_section(r, "九、标定系数与常量（高级，一般不动）"); r += 2
+    for key, name, val, unit, note, fmt in [
+        ("IVDC_LINE", "ivdc_mem_line", spec["ivdc_mem_line"], "行", "init.sh insmod tx-isp 参数", "0"),
+        ("K_ISP", "k_isp", spec["coefficients"]["k_isp"], "×单帧", "MDNS 系数；每个 sensor 各乘一次", "0.0000"),
+        ("POOL_A", "pool_a", spec["coefficients"].get("pool_a", 0), "×单帧", "码率无关 pool 系数；0 = 回退 k_recon/k_stream", "0.000000"),
+        ("POOL_B", "pool_b", spec["coefficients"].get("pool_b", 0), "B", "pool 固定项", "#,##0"),
+        ("K_JPEG", "k_jpeg", spec["coefficients"]["k_jpeg"], "×单帧", "JPEG 码流缓冲系数", "0.0000"),
+        ("JPEG_OVERHEAD", "JPEG 固定开销", spec["coefficients"]["jpeg_overhead"], "B", "实测字节 − k_jpeg×F", "#,##0"),
+        ("K_RECON", "k_recon", spec["coefficients"]["k_recon"], "×单帧", "旧式回退系数（pool_a=0 时用）", "0.0000"),
+        ("K_STREAM", "k_stream", spec["coefficients"]["k_stream"], "×maxI", "旧式回退系数（pool_a=0 时用）", "0.0000"),
+        ("MAXI_FACTOR", "maxI 系数", spec["coefficients"]["maxi_factor"], "×码率", "maxIPictureSize = maxBitRate × 5/2", "0.0000"),
+        ("H264_FACTOR", "h264_factor", spec["coefficients"].get("h264_factor", 1.22), "×H265模型", "H264 无 RFC，按 H265 模型乘此系数", "0.0000"),
+        ("SDK_RESERVED", "SDK 预留块", spec["sdk_reserved"], "B", "2 × 512,000 reuse=FREE", "#,##0"),
+        ("MTP_WND_RCV", "KCP wnd_rcv", mtp.get("wnd_rcv", 128), "段", "SDK 常量 MTP_IKCP_WND_RCV", "0"),
+        ("MTP_WND_SND", "KCP wnd_snd", mtp.get("wnd_snd", 32), "段", "SDK 常量 MTP_IKCP_WND_SND", "0"),
+        ("MTP_MTU", "KCP MTU", mtp.get("mtu_bytes", 920), "B", "SDK 常量 MTP_IKCP_MTU_DEF", "0"),
+        ("MTP_OVERHEAD_KB", "MTP 每会话开销", mtp.get("overhead_kb_per_session", 64), "KB", "会话/MBuffer/加密等，估算", "#,##0"),
+        ("BYTES_PER_MB", "1 MB", MIB, "B", "单位换算", "#,##0"),
+    ]:
+        add_param(r, key, name, val, unit, note, fmt)
+        r += 1
 
-    # ============ 标定校验 ============
-    ws = wb.create_sheet("标定校验")
+    # ---- 校验与定义名 ----
+    dv_net = DataValidation(type="list", formula1='"WiFi,4G,WiFi+4G,无（网络栈在对端 MCU/RTOS）"', allow_blank=False)
+    ws.add_data_validation(dv_net); dv_net.add(f"B{inp['NET_TYPE']}")
+    dv_yn = DataValidation(type="list", formula1='"是,否"', allow_blank=False)
+    ws.add_data_validation(dv_yn)
+    for k in ("BT_ENABLED", "MTP_ENABLED", "WEBRTC_ENABLED", "NPU_IN_CMA"):
+        dv_yn.add(f"B{inp[k]}")
+    dv = DataValidation(type="list", formula1='"是,否"', allow_blank=False)
+    ws.add_data_validation(dv)
+    for rows_ in (fs_rows, enc_rows):
+        if rows_:
+            dv.add(f"A{rows_[0]}:A{rows_[-1]}")
+    if fs_rows:
+        dv.add(f"G{fs_rows[0]}:G{fs_rows[-1]}")
+    if enc_rows:
+        dv.add(f"I{enc_rows[0]}:I{enc_rows[-1]}")
+        dv2 = DataValidation(type="list", formula1='"H265,H264,JPEG"', allow_blank=False)
+        ws.add_data_validation(dv2)
+        dv2.add(f"D{enc_rows[0]}:D{enc_rows[-1]}")
+
+    for key, row in inp.items():
+        wb.defined_names.add(DefinedName(key, attr_text=f"'输入详细'!$B${row}"))
+
+    # ==================== 详细表 ====================
+    ws = wb.create_sheet("详细表")
     ws.sheet_view.showGridLines = False
-    for col, w in zip("ABCDEF", [8, 34, 16, 42, 18, 12]):
+    for col, w in zip("ABCDEF", [16, 30, 54, 15, 10, 32]):
         ws.column_dimensions[col].width = w
-    title(ws, "实测标定与校验", "F")
+    title(ws, "详细表（按五大块展开）", "F")
     ws.merge_cells("A2:F2")
-    put(ws, 2, 1, f"平台：{spec.get('platform', 'T32Pro')}；默认基线 = <项目B> 2026-11；<项目A> 2026-06 为历史参考。项目 {spec['project']} 请按第三节重标。", size=9)
-    section(ws, 4, "一、已采集数据点（<项目A>，2026-06 ~ 2026-10）", 6)
-    header(ws, 5, ["#", "数据点", "实测字节", "来源", "模型预测字节", "误差"])
-    points = [
-        ("ISP MDNS @4K", 10436608, "rmem_optimization_analysis.md:16", "=K_ISP*3840*2160*1.5"),
-        ("FS0 IVDC VB", 1152000, "rmem_optimization_analysis.md:21", "=IVDC_LINE*3840*1.5"),
-        ("FS1 VB (nrVBs=2)", 1198080, "rmem_optimization_analysis.md:22", "=2*832*480*1.5"),
-        ("VENC pool 4K H265", 14312448, "rmem_optimization_analysis.md:19",
-         "=K_RECON*3840*2160*1.5+K_STREAM*(2000*MAXI_FACTOR*1000/8)"),
-        ("VENC pool 832×480 H265", 789248, "rmem_optimization_analysis.md:20",
-         "=K_RECON*832*480*1.5+K_STREAM*(350*MAXI_FACTOR*1000/8)"),
-        ("JPEG pool 832×480", 607360, "20261016-jpeg-snap-ondemand.md",
-         "=K_JPEG*832*480*1.5+JPEG_OVERHEAD"),
-        ("SDK ring 主码流 2000kbps×6s", 1536000, "c-mi-ipc-memory-profile.md §八", "=2000*128*6"),
-        ("SDK ring 音频 100kbps×6s", 76800, "c-mi-ipc-memory-profile.md §八", "=100*128*6"),
-        ("SDK 预留块 2×512KB", 1024000, "rmem_optimization_analysis.md:17-18", "=SDK_RESERVED"),
-    ]
-    for i, (name, meas, src, pred) in enumerate(points):
-        row = 6 + i
-        put(ws, row, 1, i + 1, align="center")
+    put(ws, 2, 1, "A 列标块（1 RMEM … 5 其他）；Excel 大纲可折叠：1 级=块内项/应用，2 级=kernel 段、各 .ko、c_mi_ipc 开销；灰色格为公式。", size=9)
+
+    def _h(*pairs):
+        n = 1
+        for text, width in pairs:
+            if not text:
+                continue
+            w = sum(2 if ord(ch) > 127 else 1 for ch in str(text))
+            n = max(n, -(-w // width))
+        return max(22, n * 14 + 8)
+
+    def line(row, name, basis, expr, note="", fill=GREY, level=1):
         put(ws, row, 2, name, bold=True)
-        put(ws, row, 3, meas, fmt="#,##0", fill=YELLOW)
-        put(ws, row, 4, src, size=8)
-        put(ws, row, 5, pred, fmt="#,##0", fill=GREY)
-        put(ws, row, 6, f"=(E{row}-C{row})/C{row}", fmt="0.000%", fill=GREY)
+        put(ws, row, 3, basis)
+        put(ws, row, 4, expr, fmt="#,##0", fill=fill)
+        put(ws, row, 5, f"=D{row}/BYTES_PER_MB", fmt="0.00", fill=fill)
+        put(ws, row, 6, note)
+        ws.row_dimensions[row].height = _h((name, 28), (basis, 52), (note, 30))
+        ws.row_dimensions[row].outlineLevel = level
+
+    def total_line(row, label, expr, basis="SUM", note="", level=0):
+        put(ws, row, 2, label, bold=True)
+        put(ws, row, 3, basis)
+        put(ws, row, 4, expr, fmt="#,##0", fill=GREEN, bold=True)
+        put(ws, row, 5, f"=D{row}/BYTES_PER_MB", fmt="0.00", fill=GREEN, bold=True)
+        put(ws, row, 6, note)
         ws.row_dimensions[row].height = 22
+        ws.row_dimensions[row].outlineLevel = level
 
-    section(ws, 16, "二、历史双点拟合 k_recon / k_stream（已废弃，仅供对照；现行用 pool_a/pool_b）", 6)
-    header(ws, 17, ["", "参数", "值", "说明"])
-    fit_rows = [
-        (18, "Pm 主码流实测 pool", 14312448, "4K H265 编码器 pool"),
-        (19, "Fm 主码流单帧", "=3840*2160*1.5", "12,441,600 B"),
-        (20, "Im 主码流 maxI 字节", "=2000*MAXI_FACTOR*1000/8", "625,000 B"),
-        (21, "Ps 次码流实测 pool", 789248, "832×480 H265 编码器 pool"),
-        (22, "Fs 次码流单帧", "=832*480*1.5", "599,040 B"),
-        (23, "Is 次码流 maxI 字节", "=350*MAXI_FACTOR*1000/8", "109,375 B"),
-        (24, "k_recon 拟合值", "=(C18*C23-C21*C20)/(C19*C23-C22*C20)", "F 的系数"),
-        (25, "k_stream 拟合值", "=(C19*C21-C22*C18)/(C19*C23-C22*C20)", "maxI 的系数"),
-        (26, "当前使用 k_recon", "=K_RECON", "输入参数 B14"),
-        (27, "当前使用 k_stream", "=K_STREAM", "输入参数 B15"),
+    def block_label(first, last, text):
+        # 不纵向合并：合并区跨折叠行时 Excel 显示不可靠；块名同时写在首行与小计行，折叠后仍可见
+        for rr in range(first, last + 1):
+            c = ws.cell(row=rr, column=1)
+            c.border = BORDER
+            c.fill = PatternFill("solid", fgColor=LBLUE)
+        for rr in (first,):
+            c = ws.cell(row=rr, column=1, value=text)
+            c.font = Font(name=FONT, size=10, bold=True)
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    r = 4
+    header(ws, r, ["块", "项目", "计算依据", "字节", "MB", "备注"]); r += 1
+
+    # ---- 块 1：RMEM ----
+    b = r
+    rmem_first = r
+    if measured:
+        for blk in mblocks:
+            if blk.get("group") == "算法":
+                continue
+            line(r, blk.get("name", "块"), f"实测 · {blk.get('group', '')}（mma_heap_name0）",
+                 float(blk.get("bytes", 0)), blk.get("note", ""))
+            r += 1
+        if spec.get("sdk_reserved"):
+            line(r, "SDK 预留块", "spec.sdk_reserved", float(spec["sdk_reserved"]), "媒体堆外的小块预留")
+            r += 1
+        rmem_sub = r
+        total_line(r, "RMEM 小计", f"=SUM(D{rmem_first}:D{r - 1})", "媒体堆 used − 算法块", "块 1 合计")
+        r += 1
+        cap = result["rmem"]["cap"]
+        line(r, "媒体堆容量 cap", "bootargs mma_heap=...,sz=（carve-out 上限）", cap,
+             f"used {result['rmem']['usage'] * 100:.1f}%；Linux 可见 = DRAM − cap", fill=GREEN, level=0)
+        r += 1
+        block_label(b, r - 1, "1. RMEM")
+        r += 1
+    else:
+        for s in result["rmem"]["mdns_by_sensor"]:
+            terms = ",".join(
+                f"IF(AND('输入详细'!$A${x}=\"是\",'输入详细'!$C${x}={s}),"
+                f"'输入详细'!$D${x}*'输入详细'!$E${x}*1.5,0)"
+                for x in fs_rows
+            )
+            line(r, f"ISP MDNS · Sensor {s}", "k_isp × 该 sensor 的最大帧字节", f"=K_ISP*MAX({terms})", "每 sensor 一份，不是全机一份")
+            r += 1
+        for i, x in enumerate(fs_rows):
+            name = spec["frame_sources"][i].get("name", f"FS{i}")
+            line(r, f"{name} VB", "IVDC：ivdc_mem_line×W×1.5；否则 nrVBs×W×H×1.5",
+                 f"=IF('输入详细'!$A${x}=\"否\",0,IF('输入详细'!$G${x}=\"是\","
+                 f"IVDC_LINE*'输入详细'!$D${x}*1.5,"
+                 f"'输入详细'!$F${x}*'输入详细'!$D${x}*'输入详细'!$E${x}*1.5))",
+                 f"Sensor {spec['frame_sources'][i].get('sensor', 0)}")
+            r += 1
+        for i, x in enumerate(enc_rows):
+            line(r, f"{spec['encoders'][i].get('name', f'enc{i}')} VENC pool",
+                 "JPEG：k_jpeg×F+overhead；否则 pool_a×F+pool_b（与码率无关）",
+                 f"=IF('输入详细'!$A${x}=\"否\",0,IF('输入详细'!$D${x}=\"JPEG\","
+                 f"K_JPEG*'输入详细'!$E${x}*'输入详细'!$F${x}*1.5+JPEG_OVERHEAD,"
+                 f"IF(POOL_A>0,"
+                 f"(POOL_A*'输入详细'!$E${x}*'输入详细'!$F${x}*1.5+POOL_B)*"
+                 f"IF('输入详细'!$D${x}=\"H264\",H264_FACTOR,1),"
+                 f"(K_RECON*'输入详细'!$E${x}*'输入详细'!$F${x}*1.5+"
+                 f"K_STREAM*('输入详细'!$G${x}*MAXI_FACTOR*1000/8))*"
+                 f"IF('输入详细'!$D${x}=\"H264\",H264_FACTOR,1))))",
+                 f"Sensor {spec['encoders'][i].get('sensor', 0)}；pool_a=0 时回退 k_recon/k_stream")
+            r += 1
+        line(r, "SDK 预留块", "2 × 512,000 B（reuse=FREE）", "=SDK_RESERVED", "continuous_alloc 小块")
+        r += 1
+        rmem_sub = r
+        total_line(r, "RMEM 小计", f"=SUM(D{rmem_first}:D{r - 1})", f"SUM(D{rmem_first}:D{r - 1})", "块 1 合计")
+        r += 1
+        line(r, "建议 rmem carve-out", "按需求向上取整到 1MB",
+             f"=CEILING(D{rmem_sub}/BYTES_PER_MB,1)*BYTES_PER_MB", "rmem 由管线计算，不做输入", fill=GREEN, level=0)
+        r += 1
+        block_label(b, r - 1, "1. RMEM")
+        r += 1
+
+    # ---- 块 2：Linux 系统 ----
+    os_block = r
+    b = r
+    cma_note = ("NPU+算法已超 CMA 总量，CMA 全额计入算法块"
+                if na.get("inside_cma", True)
+                and (float(na.get("npu_pool_kb", 0)) + float(na.get("algo_model_kb", 0))) * 1024.0 > float(fx.get("cma", 0))
+                else "避免与算法块双算")
+
+    def sub_line(row, name, basis, expr, note=""):
+        put(ws, row, 2, "     · " + name)
+        put(ws, row, 3, basis)
+        put(ws, row, 4, expr, fmt="#,##0")
+        put(ws, row, 5, f"=D{row}/BYTES_PER_MB", fmt="0.00")
+        put(ws, row, 6, note)
+        ws.row_dimensions[row].height = _h((name, 26), (basis, 52), (note, 30))
+        ws.row_dimensions[row].outlineLevel = 2
+
+    os_top = []
+    for key, label, basis, expr, note in [
+        ("kernel", "kernel", "内核代码+数据：各段之和 + 页表 + 栈 + 余量", "=FIX_KERNEL", "展开项见上，可折叠"),
+        ("modules", "modules", "已加载 .ko 段大小之和", "=FIX_MODULES", "展开项见上，可折叠"),
+    ]:
+        for i, part in enumerate(fx.get("parts", {}).get(key, [])):
+            sub_line(r, part["name"], part.get("basis", "构建产物段大小（不含 init/exit）"),
+                     f"=FIX_{key.upper()}_P{i}", part.get("note", ""))
+            r += 1
+        os_top.append(r)
+        line(r, label, basis, expr, note)
+        r += 1
+    for name, basis, expr, note in [
+        ("CMA（非算法）", "总 CMA − NPU/算法；算法不含 CMA 时取全量",
+         "=IF(NPU_IN_CMA=\"是\",MAX(0,FIX_CMA-(NPU_POOL_KB+ALGO_MODEL_KB)*1024),FIX_CMA)", cma_note),
+        ("slab", "仅 SUnreclaim 经验值", "=FIX_SLAB", "SReclaimable 不计"),
+        ("file cache", "squashfs 代码页，可回收", "=FIX_FILE_CACHE", "硬占用会扣掉它"),
+        ("zram", "zsmalloc 压缩后实际占用", "=FIX_ZRAM", "按压力上界计入"),
+    ]:
+        os_top.append(r)
+        line(r, name, basis, expr, note)
+        r += 1
+    os_sub = r
+    total_line(r, "Linux 系统小计", "=SUM(" + ",".join(f"D{x}" for x in os_top) + ")",
+               "kernel + modules + CMA + slab + cache + zram", "块 2 合计")
+    r += 1
+    block_label(b, r - 1, "2. Linux 系统")
+    r += 1
+
+    # ---- 块 3：Linux 应用 ----
+    app_block = r
+    b = r
+    app_first = r
+    for i, x in enumerate(enc_rows):
+        sub_line(r, f"{spec['encoders'][i].get('name', f'enc{i}')} 流缓存 ring",
+                 "ring 码率 × 128 × 缓存秒数（启用且勾 ring、非 JPEG）",
+                 f"=IF(AND('输入详细'!$A${x}=\"是\",'输入详细'!$I${x}=\"是\","
+                 f"'输入详细'!$D${x}<>\"JPEG\"),'输入详细'!$H${x}*128*BUF_SEC,0)",
+                 "SDK 堆，开机一次性 calloc")
+        r += 1
+    sub_line(r, "音频流缓存 ring", "音频码率 × 128 × 缓存秒数 × 通道数", "=AUDIO_KBPS*128*BUF_SEC*AUDIO_CH", "OPUS 25fps")
+    r += 1
+    sub_line(r, "P2P 收发缓冲", "客户端 ×（视频块×块数 + 音频块×块数×2）",
+             "=P2P_CLIENTS*(P2P_VID_KB*1024*P2P_VID_BUFS+P2P_AUD_KB*1024*P2P_AUD_BUFS*2)", "块数为估计值，需实测")
+    r += 1
+    sub_line(r, "MTP SDK（可选）", "固定 + sessions × ((wnd_rcv+wnd_snd)×MTU + 每会话开销)",
+             "=IF(MTP_ENABLED=\"否\",0,IF(MTP_MEASURED>0,MTP_MEASURED,"
+             "MTP_FIXED_KB*1024+MTP_SESSIONS*((MTP_WND_RCV+MTP_WND_SND)*MTP_MTU+MTP_OVERHEAD_KB*1024)))",
+             "KCP 窗口估算；有实测填实测覆盖")
+    r += 1
+    sub_line(r, "海外语控 SDK（可选）", "固定 + 会话数 × 每会话开销",
+             "=IF(WEBRTC_ENABLED=\"否\",0,IF(WEBRTC_MEASURED>0,WEBRTC_MEASURED,"
+             "WEBRTC_FIXED_KB*1024+WEBRTC_SESSIONS*WEBRTC_PER_SESSION_KB*1024))",
+             "统称 WebRTC / Alexa / Google")
+    r += 1
+    sub_line(r, "新增线程栈", "新增线程数 × 每线程栈（物理触底）", "=EXTRA_THREADS*THREAD_STACK_KB*1024",
+             "基准线程已含在基础 anon，不重复加")
+    r += 1
+    sub_line(r, "基础 anon", "不含 ring/P2P 的堆与栈", "=FIX_APP_BASE", "固定项基线")
+    r += 1
+    mike_sub = r
+    app_name = "mi_ipc" if measured else "c_mi_ipc"
+    total_line(r, f"{app_name} 合计", f"=SUM(D{app_first}:D{r - 1})", f"SUM(D{app_first}:D{r - 1})",
+               "应用开销见上（ring / 音频 / P2P / MTP / 语控 / 线程 / 基础 anon）", level=1)
+    r += 1
+    miio1 = r
+    line(r, "miio_client", "独立 IoT 客户端 RSS", "=FIX_MIIO_CLIENT", "固定项基线")
+    r += 1
+    miio2 = r
+    line(r, "miio_ot", "如有独立进程，按实测 RSS", "=FIX_MIIO_OT", "固定项基线")
+    r += 1
+    app_sub = r
+    total_line(r, "Linux 应用小计", f"=D{mike_sub}+D{miio1}+D{miio2}", "c_mi_ipc + miio_client + miio_ot", "块 3 合计")
+    r += 1
+    block_label(b, r - 1, "3. Linux 应用")
+    r += 1
+
+    # ---- 块 4：算法 ----
+    b = r
+    algo_first = r
+    if measured:
+        for blk in mblocks:
+            if blk.get("group") != "算法":
+                continue
+            line(r, blk.get("name", "算法块"), "实测 · MMA 堆内（已从 RMEM 划出，不双算）",
+                 float(blk.get("bytes", 0)), blk.get("note", ""))
+            r += 1
+    else:
+        line(r, "NPU 池", "TNPU/CMA 池（init.sh cma_pool_size）", "=NPU_POOL_KB*1024", "不可随手缩：长测会被动态缓冲吃干")
+        r += 1
+        line(r, "算法模型", "查 references/algo-models.md 登记表", "=ALGO_MODEL_KB*1024", "flash 模型文件大小不是工作内存")
+        r += 1
+    algo_sub = r
+    total_line(r, "算法小计", f"=SUM(D{algo_first}:D{r - 1})", f"SUM(D{algo_first}:D{r - 1})", "块 4 合计")
+    r += 1
+    block_label(b, r - 1, "4. 算法")
+    r += 1
+
+    # ---- 块 5：其他 ----
+    b = r
+    other_first = r
+    line(r, "other_procs", "init / log / adbd / storage 等", "=FIX_OTHER_PROCS", "固定项基线")
+    r += 1
+    line(r, "网络（WiFi/4G）", "按网络类型取 wpa_supplicant / LTE supplicant",
+         "=IF(OR(NET_TYPE=\"WiFi\",NET_TYPE=\"WiFi+4G\"),NET_WIFI_KB*1024,0)"
+         "+IF(OR(NET_TYPE=\"4G\",NET_TYPE=\"WiFi+4G\"),(NET_LTE_KB+NET_LTE_MOD_KB)*1024,0)",
+         "WiFi 机型未填按 0 计，可能漏计")
+    r += 1
+    line(r, "蓝牙用户态", "miio_bt；内核模块在 Linux 系统块", "=IF(BT_ENABLED=\"是\",BT_USER_KB*1024,0)", "4K 样机 实测 868KB")
+    r += 1
+    other_sub = r
+    total_line(r, "其他小计", f"=SUM(D{other_first}:D{r - 1})", f"SUM(D{other_first}:D{r - 1})", "块 5 合计")
+    r += 1
+    block_label(b, r - 1, "5. 其他")
+    r += 1
+
+    ws.row_breaks.append(Break(id=os_block - 1))
+    ws.row_breaks.append(Break(id=app_block - 1))
+    grand = r
+    ws.cell(row=grand, column=1).border = BORDER
+    put(ws, grand, 2, "五大块合计", bold=True)
+    put(ws, grand, 3, "1+2+3+4+5")
+    put(ws, grand, 4, f"=D{rmem_sub}+D{os_sub}+D{app_sub}+D{algo_sub}+D{other_sub}",
+        fmt="#,##0", fill=GREEN, bold=True)
+    put(ws, grand, 5, f"=D{grand}/BYTES_PER_MB", fmt="0.00", fill=GREEN, bold=True)
+    put(ws, grand, 6, "应等于『汇总』五项合计")
+    ws.row_dimensions[grand].height = 22
+    r += 2
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+    put(ws, r, 1, "口径：rmem 先从 DRAM 扣掉，Linux 可见 = DRAM − rmem；算法含 CMA 时从 Linux 系统 CMA 中扣除，避免双算。", size=9)
+    ws.row_dimensions[r].height = 26
+
+    # ==================== 汇总 ====================
+    ws = wb.create_sheet("汇总")
+    ws.sheet_view.showGridLines = False
+    for col, w in zip("ABCD", [32, 18, 12, 56]):
+        ws.column_dimensions[col].width = w
+    title(ws, f"{spec['project']} 内存汇总（简化）", "D")
+    ws.merge_cells("A2:D2")
+    put(ws, 2, 1, "每块一行，逐项明细见『详细表』；判定看硬余量。", size=9)
+    section(ws, 3, "一、五大块汇总与最终预留", 4)
+    header(ws, 4, ["项目", "字节", "MB", "说明"])
+    rows = [
+        ("DRAM 总量", "=DRAM_MB*BYTES_PER_MB", "硬件"),
+        ("1. RMEM", f"='详细表'!D{rmem_sub}",
+         "MMA 堆 used（含编码/帧源/ISP，未含算法块）" if measured else "媒体 carve-out（含 JPEG / SDK 预留）"),
+        ("2. Linux 系统", f"='详细表'!D{os_sub}", "kernel / modules / CMA(非算法) / slab / cache / zram"),
+        ("3. Linux 应用", f"='详细表'!D{app_sub}", "c_mi_ipc 合计 + miio_client / miio_ot"),
+        ("4. 算法", f"='详细表'!D{algo_sub}", "NPU 池 + 算法模型"),
+        ("5. 其他", f"='详细表'!D{other_sub}", "other_procs + 网络 + 蓝牙"),
+        ("五项合计", "=SUM(B6:B10)", "1+2+3+4+5"),
+        ("最终预留（账面）", "=B5-B11", "DRAM − 五项合计"),
+        ("硬占用", "=B11-FIX_FILE_CACHE", "五项合计 − file cache（可回收）"),
+        ("硬余量", "=B5-B13", "DRAM − 硬占用；判定看这一行"),
     ]
-    for row, name, val, note in fit_rows:
-        put(ws, row, 2, name, bold=True)
-        fmt = "0.0000" if ("k_" in name) else "#,##0"
-        put(ws, row, 3, val, fmt=fmt, fill=GREY, align="center")
-        ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=6)
-        put(ws, row, 4, note)
-        for cc in (5, 6):
-            ws.cell(row=row, column=cc).border = BORDER
-    put(ws, 29, 2, "拟合校验", bold=True)
-    put(ws, 29, 3, "=IF(AND(ABS(C24-C26)<0.001,ABS(C25-C27)<0.001),"
-                  "\"✅ 当前系数与拟合一致\",\"⚠ 系数不同：把 C24/C25 回填『输入参数』B14/B15\")",
-        fill=GREEN)
-    ws.merge_cells("C29:F29")
+    r = 5
+    for name, expr, note in rows:
+        put(ws, r, 1, name, bold=True)
+        put(ws, r, 2, expr, fmt="#,##0", fill=GREY)
+        put(ws, r, 3, f"=B{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
+        put(ws, r, 4, note)
+        ws.row_dimensions[r].height = 22
+        r += 1
+    verdict_row = r + 1
+    put(ws, verdict_row, 1, "判定", bold=True)
+    put(ws, verdict_row, 2, "=IF(B14>=0,\"✅ 预算可行\",\"⚠️ 预算超支\")", fill=GREEN)
+    ws.merge_cells(start_row=verdict_row, start_column=2, end_row=verdict_row, end_column=4)
 
-    section(ws, 31, "三、实机采集命令（新构建 / 新项目重标时用）", 6)
-    cmds = [
-        "① 确认 rmem：cat /proc/cmdline",
-        "② 媒体拓扑：impdbg --fs_info / --enc_info（enc_info 第二个 GROUP 在 25 行之后）",
-        "③ rmem 明细：cat /tmp/continuous_mem_info（SDK continuous_alloc dump）",
-        "④ Linux：cat /proc/meminfo ; cat /proc/buddyinfo",
-        "⑤ app：P=$(ps | awk '/[c]_mi_ipc/{print $1; exit}'); awk '/^Rss:/{R+=$2}/^Anonymous:/{A+=$2}/^Swap:/{W+=$2} END{printf \"RSS=%d anon=%d file=%d swap=%d kB\\n\",R,A,R-A,W}' /proc/$P/smaps",
-        "⑥ 写 SD 卡再取，不要写 /tmp；串口不要 cat 大文件。",
-    ]
-    for i, s in enumerate(cmds):
-        row = 32 + i
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
-        put(ws, row, 1, s, size=9)
-        for cc in range(2, 7):
-            ws.cell(row=row, column=cc).border = BORDER
-        ws.row_dimensions[row].height = 24
+    section(ws, verdict_row + 2, "二、判定口径", 4)
+    for i, s in enumerate([
+        "账面占用 = 五项合计；硬占用 = 五项合计 − file_cache；硬余量 = DRAM − 硬占用，OK/超看硬余量。",
+        "rmem 与 Linux 是两本账：rmem 先从 DRAM 扣掉再算 Linux 可见，不能拿 Linux 余量补 rmem。",
+        "默认最大场景（常驻组件全在线 + 全流 + P2P 满客户端 + 缓存取最大），稳态快照只作参考。",
+    ]):
+        rr = verdict_row + 3 + i
+        ws.merge_cells(start_row=rr, start_column=1, end_row=rr, end_column=4)
+        put(ws, rr, 1, s)
+        ws.row_dimensions[rr].height = 24
 
-    section(ws, 40, "四、<项目B> 实测（2026-11-09，rmem 24,064K / isp_memopt=0x7）", 6)
-    header(ws, 41, ["#", "数据点", "实测字节", "来源", "模型预测", "误差"])
-    hm_points = [
-        ("ISP MDNS @4K", 9433088, "continuous_mem_info", "=K_ISP*3840*2160*1.5"),
-        ("FS0 IVDC VB", 1152000, "continuous_mem_info", "=IVDC_LINE*3840*1.5"),
-        ("FS1 VB (nrVBs=2)", 1198080, "continuous_mem_info", "=2*832*480*1.5"),
-        ("VENC main 4K/1500", 10579968, "continuous_mem_info",
-         "=K_RECON*3840*2160*1.5+K_STREAM*(1500*MAXI_FACTOR*1000/8)"),
-        ("VENC sub 480P/350", 1115136, "continuous_mem_info",
-         "=K_RECON*832*480*1.5+K_STREAM*(350*MAXI_FACTOR*1000/8)"),
-        ("JPEG pool 832×480", 609536, "continuous_mem_info", "=K_JPEG*832*480*1.5+JPEG_OVERHEAD"),
-        ("SDK small blocks", 113152, "continuous_mem_info", "=SDK_RESERVED"),
-        ("rmem 合计", 24200960, "continuous_mem_info", "=SUM(E42:E48)"),
-    ]
-    for i, (name, meas, src, pred) in enumerate(hm_points):
-        row = 42 + i
-        put(ws, row, 1, i + 1, align="center")
-        put(ws, row, 2, name, bold=True)
-        put(ws, row, 3, meas, fmt="#,##0", fill=YELLOW)
-        put(ws, row, 4, src, size=8)
-        put(ws, row, 5, pred, fmt="#,##0", fill=GREY)
-        put(ws, row, 6, f"=(E{row}-C{row})/C{row}", fmt="0.000%", fill=GREY)
-        ws.row_dimensions[row].height = 22
-
-    section(ws, 51, "五、<项目B> 双点拟合（4K 1500kbps + 480P 350kbps）", 6)
-    header(ws, 52, ["", "参数", "值", "说明"])
-    hm_fit = [
-        (53, "Pm 主码流实测 pool", 10579968, "4K H265/1500"),
-        (54, "Fm 主码流单帧", "=3840*2160*1.5", "12,441,600 B"),
-        (55, "Im 主码流 maxI 字节", "=1500*MAXI_FACTOR*1000/8", "468,750 B"),
-        (56, "Ps 次码流实测 pool", 1115136, "832×480 H265/350"),
-        (57, "Fs 次码流单帧", "=832*480*1.5", "599,040 B"),
-        (58, "Is 次码流 maxI 字节", "=350*MAXI_FACTOR*1000/8", "109,375 B"),
-        (59, "k_recon 拟合值", "=(C53*C58-C56*C55)/(C54*C58-C57*C55)", "F 的系数"),
-        (60, "k_stream 拟合值", "=(C54*C56-C57*C53)/(C54*C58-C57*C55)", "maxI 的系数"),
-        (61, "当前使用 k_recon", "=K_RECON", "输入参数 B14"),
-        (62, "当前使用 k_stream", "=K_STREAM", "输入参数 B15"),
-    ]
-    for row, name, val, note in hm_fit:
-        put(ws, row, 2, name, bold=True)
-        fmt = "0.0000" if ("k_" in name) else "#,##0"
-        put(ws, row, 3, val, fmt=fmt, fill=GREY, align="center")
-        ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=6)
-        put(ws, row, 4, note)
-        for cc in (5, 6):
-            ws.cell(row=row, column=cc).border = BORDER
-    put(ws, 64, 2, "拟合校验", bold=True)
-    put(ws, 64, 3, "=IF(AND(ABS(C59-C61)<0.001,ABS(C60-C62)<0.001),"
-                   "\"✅ <项目B> 系数一致\",\"⚠ 当前 spec 未用 <项目B> 系数，误差大属正常\")",
-        fill=GREEN)
-    ws.merge_cells("C64:F64")
-
-    # ============ 速查表 ============
+    # ==================== 速查表 ====================
     ws = wb.create_sheet("速查表")
     ws.sheet_view.showGridLines = False
-    widths = [18, 9, 9, 12, 8, 8, 11, 11, 11, 12, 12, 14, 14, 14]
+    widths = [24, 10, 10, 12, 8, 8, 11, 11, 11, 12, 12, 14, 14, 14]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
-    title(ws, "分辨率 × 码率 速查（单视频通道 + 单帧源）", "N")
+    title(ws, "附录 · 速查表", "N")
     ws.merge_cells("A2:N2")
-    put(ws, 2, 1, "不含固定项；rmem = VENC + FS VB + MDNS + SDK 预留；Linux = ring + P2P。"
-                  "双摄请对每个 sensor 各算一行后再相加（MDNS 分开）；速查表不含 MTP。", size=9)
+    put(ws, 2, 1, "主表：分辨率 × 码率横比；附表：实测标定点与采集命令。", size=9)
+    section(ws, 3, "一、分辨率 × 码率速查（不含固定项，单视频通道 + 单帧源）", 14)
     header(ws, 4, ["分辨率", "W", "H", "码率 kbps", "帧率", "IVDC", "单帧 KB", "VENC MB",
                    "FS VB MB", "ISP MDNS MB", "SDK ring MB", "rmem 合计 MB", "Linux 动态 MB", "合计动态 MB"])
     presets = [
@@ -995,11 +1170,15 @@ def build_workbook(spec, result, out_path):
         put(ws, row, 5, fps, fmt="0", fill=YELLOW, align="center")
         put(ws, row, 6, ivdc, fill=YELLOW, align="center")
         put(ws, row, 7, f"=B{row}*C{row}*1.5/1024", fmt="#,##0", fill=GREY)
-        put(ws, row, 8, f"=(K_RECON*B{row}*C{row}*1.5+K_STREAM*(D{row}*MAXI_FACTOR*1000/8))/BYTES_PER_MB", fmt="0.00", fill=GREY)
-        put(ws, row, 9, f"=IF(F{row}=\"是\",IVDC_LINE*B{row}*1.5,2*B{row}*C{row}*1.5)/BYTES_PER_MB", fmt="0.00", fill=GREY)
+        put(ws, row, 8, f"=IF(POOL_A>0,POOL_A*B{row}*C{row}*1.5+POOL_B,"
+                        f"K_RECON*B{row}*C{row}*1.5+K_STREAM*(D{row}*MAXI_FACTOR*1000/8))/BYTES_PER_MB",
+            fmt="0.00", fill=GREY)
+        put(ws, row, 9, f"=IF(F{row}=\"是\",IVDC_LINE*B{row}*1.5,2*B{row}*C{row}*1.5)/BYTES_PER_MB",
+            fmt="0.00", fill=GREY)
         put(ws, row, 10, f"=K_ISP*B{row}*C{row}*1.5/BYTES_PER_MB", fmt="0.00", fill=GREY)
         put(ws, row, 11, f"=D{row}*128*BUF_SEC/BYTES_PER_MB", fmt="0.00", fill=GREY)
-        put(ws, row, 12, f"=(K_RECON*B{row}*C{row}*1.5+K_STREAM*(D{row}*MAXI_FACTOR*1000/8)+"
+        put(ws, row, 12, f"=(IF(POOL_A>0,POOL_A*B{row}*C{row}*1.5+POOL_B,"
+                         f"K_RECON*B{row}*C{row}*1.5+K_STREAM*(D{row}*MAXI_FACTOR*1000/8))+"
                          f"IF(F{row}=\"是\",IVDC_LINE*B{row}*1.5,2*B{row}*C{row}*1.5)+"
                          f"K_ISP*B{row}*C{row}*1.5+SDK_RESERVED)/BYTES_PER_MB", fmt="0.00", fill=GREEN)
         put(ws, row, 13, f"=(D{row}*128*BUF_SEC+P2P_CLIENTS*(P2P_VID_KB*1024*P2P_VID_BUFS+"
@@ -1007,84 +1186,104 @@ def build_workbook(spec, result, out_path):
         put(ws, row, 14, f"=L{row}+M{row}", fmt="0.00", fill=GREEN)
         ws.row_dimensions[row].height = 22
     ws.merge_cells("A18:N19")
-    put(ws, 18, 1, "注：默认系数来自 <项目B> 2026-11 实测；<项目A> 2026-06 的 28MB 场景为历史参考。"
-                   "其他项目请先按『标定校验』重新拟合。双摄的 MDNS 要按 sensor 各算一次。",
-        size=9, fill=RED)
+    if measured:
+        put(ws, 18, 1, "注：本表是君正 T32Pro 的 rmem 参考式（按分辨率/码率推导 pool），"
+                       "SigmaStar 的媒体内存由 mma_heap_name0 实测块决定，不用本表外推；"
+                       "本项目实际占用以『详细表』块 1 为准。", size=9, fill=RED)
+    else:
+        put(ws, 18, 1, "注：默认系数来自 4K-4G 2026-11 实测；4K-WiFi 2026-06 的 28MB 场景为历史参考。"
+                       "其他项目请按附表重新拟合。双摄的 MDNS 要按 sensor 各算一次。", size=9, fill=RED)
     ws.row_dimensions[18].height = 30
 
-    # ============ 系统汇总 ============
-    ws = wb.create_sheet("系统汇总")
-    ws.sheet_view.showGridLines = False
-    for col, w in zip("ABCD", [30, 18, 12, 62]):
-        ws.column_dimensions[col].width = w
-    title(ws, f"{spec['project']} 系统内存汇总", "D")
-    sy = result["system"]
-    lin = result["linux"]
-    ap = sy["apps"]
-    tp = sy["top"]
-    rmem = result["rmem"]
-    venc_all = sum(x["bytes"] for x in rmem["venc"])
-    jpeg_bytes = sum(x["bytes"] for x in rmem["venc"] if x.get("type") == "JPEG")
-    section(ws, 3, "一、五项内存占用与最终预留", 4)
-    header(ws, 4, ["项目", "字节", "MB", "说明"])
-    put(ws, 2, 1, "本表为脚本生成的快照；改『输入参数』后请重跑脚本更新。", size=9)
-    ws.merge_cells("A2:D2")
-    rows = [
-        ("DRAM 总量", sy["dram"], "硬件"),
-        ("1. RMEM", tp["rmem"], "媒体 carve-out，自动计算"),
-        ("  · ISP MDNS", rmem["mdns"], "按 sensor 分组"),
-        ("  · FS VB", rmem["fs_vb"], "IVDC 行缓存 / nrVBs×帧"),
-        ("  · VENC（不含 JPEG）", venc_all - jpeg_bytes, "H265/H264 编码器 pool"),
-        ("  · JPEG", jpeg_bytes, "抓拍 pool"),
-        ("  · SDK 预留", rmem["sdk_reserved"], "continuous_alloc 小块"),
-        ("2. Linux 系统", tp["linux_system"], "kernel/modules/CMA(非算法)/cache/zram"),
-        ("  · kernel + modules", tp["kernel"] + tp["modules"], "内核代码/数据/模块"),
-        ("  · CMA（非算法）", tp["platform_cma"], "总 CMA − NPU/算法"),
-        ("  · Slab", tp.get("slab", 0), "SUnreclaim 经验值；可回收部分不计"),
-        ("  · file cache", tp["file_cache"], "squashfs 代码页，可回收"),
-        ("  · zram", tp["zram"], "zsmalloc 压缩后"),
-        ("3. Linux 应用", tp["linux_apps"], "MIKE SDK + miio_client/ot"),
-        ("  · MIKE SDK（c_mi_ipc）", ap["mike_total"], "基础 anon + 动态 SDK"),
-        ("    · 流缓存 ring", lin["rings"], "码率×128×缓存秒数"),
-        ("    · 音频 ring", lin["audio_ring"], "音频码率×128×缓存秒数"),
-        ("    · P2P", lin["p2p"], "客户端×(视频块+音频块×2)"),
-        ("    · MTP", lin.get("mtp", 0), "KCP 窗口估算/实测"),
-        ("    · 海外语控 SDK", lin.get("webrtc", 0), "统称 WebRTC/Alexa/Google"),
-        ("    · 基础 anon", ap["mike_base"], "不含 ring/P2P 的堆与栈"),
-        ("  · miio_client / miio_ot", ap["miio_total"], "独立 IoT 客户端 RSS"),
-        ("4. 算法", tp["algorithm"], "NPU 池 + 算法模型"),
-        ("  · NPU 池", sy["npu"], "TNPU/CMA 池"),
-        ("  · 算法模型", sy["algo"], "算法工作内存预留"),
-        ("5. 其他", tp["other"], "other_procs + 网络（WiFi/4G）"),
-        ("  · other_procs", ap["other_procs"], "adbd/storage/log 等"),
-        ("  · 网络（WiFi/4G）", ap["network"], "wpa_supplicant / LTE supplicant"),
-        ("  · 蓝牙", ap.get("bluetooth", 0), "miio_bt 用户态（模块在 OS 层）"),
-        ("五项合计", tp["total"], "RMEM + Linux系统 + Linux应用 + 算法 + 其他"),
-        ("最终预留（账面）", tp["final_reserve"], "DRAM − 五项合计"),
-        ("硬占用", sy.get("hard_total", tp["total"]), "五项合计 − file_cache（可回收）"),
-        ("硬余量", sy.get("hard_reserve", tp["final_reserve"]), "DRAM − 硬占用；判定看这一行"),
-        ("按 bootargs rmem 的运行时余量", sy.get("runtime_reserve", tp["final_reserve"]),
-         "最终预留 − max(0, bootargs rmem − rmem 需求)"),
+    pts = [
+        ("4K-4G ISP MDNS @4K", 9433088, "continuous_mem_info", "k_isp × max(F)"),
+        ("4K-4G FS0 IVDC VB", 1152000, "continuous_mem_info", "ivdc_mem_line × W × 1.5"),
+        ("4K-4G FS1 VB (nrVBs=2)", 1198080, "continuous_mem_info", "nrVBs × W × H × 1.5"),
+        ("4K-4G VENC 主 4K/1500", 10579968, "continuous_mem_info", "pool_a × F + pool_b"),
+        ("4K-4G VENC 次 480P/350", 1115136, "continuous_mem_info", "pool_a × F + pool_b"),
+        ("4K-4G JPEG pool 832×480", 609536, "continuous_mem_info", "k_jpeg × F + overhead"),
+        ("4K-4G SDK small blocks", 113152, "continuous_mem_info", "SDK 预留块"),
+        ("4K-WiFi ISP MDNS @4K", 10436608, "rmem_optimization_analysis.md:16", "k_isp × max(F)（2026-06 系数）"),
+        ("4K-WiFi FS0 IVDC VB", 1152000, "rmem_optimization_analysis.md:21", "ivdc_mem_line × W × 1.5"),
+        ("4K-WiFi FS1 VB (nrVBs=2)", 1198080, "rmem_optimization_analysis.md:22", "nrVBs × W × H × 1.5"),
+        ("4K-WiFi VENC pool 4K H265", 14312448, "rmem_optimization_analysis.md:19", "旧式 k_recon×F + k_stream×I"),
+        ("4K-WiFi VENC pool 832×480", 789248, "rmem_optimization_analysis.md:20", "旧式 k_recon×F + k_stream×I"),
+        ("4K-WiFi JPEG pool 832×480", 607360, "20261016-jpeg-snap-ondemand.md", "k_jpeg × F + overhead"),
+        ("4K-WiFi SDK ring 主 2000kbps×6s", 1536000, "c-mi-ipc-memory-profile.md §八", "ring kbps × 128 × 秒"),
+        ("4K-WiFi SDK ring 音频 100kbps×6s", 76800, "c-mi-ipc-memory-profile.md §八", "音频 kbps × 128 × 秒"),
+        ("4K-WiFi SDK 预留块 2×512KB", 1024000, "rmem_optimization_analysis.md:17-18", "2 × 512,000 B"),
     ]
-    r = 5
-    idx = {}
-    for name, val, note in rows:
-        idx[name] = r
-        put(ws, r, 1, name, bold=True)
-        put(ws, r, 2, val, fmt="#,##0", fill=GREY)
-        put(ws, r, 3, f"=B{r}/BYTES_PER_MB", fmt="0.00", fill=GREY)
-        put(ws, r, 4, note)
-        ws.row_dimensions[r].height = 22
-        r += 1
-    verdict_row = r + 1
-    put(ws, verdict_row, 1, "判定", bold=True)
-    put(ws, verdict_row, 2,
-        f"=IF(B{idx['按 bootargs rmem 的运行时余量']}>=0,\"✅ 预算可行\",\"⚠️ 预算超支\")", fill=GREEN)
-    ws.merge_cells(start_row=verdict_row, start_column=2, end_row=verdict_row, end_column=4)
-    put(ws, verdict_row + 2, 1, "口径：五项合计 = RMEM + Linux系统 + Linux应用 + 算法 + 其他；最终预留 = DRAM − 五项合计。NPU/算法含 CMA 时从 Linux 系统 CMA 中扣除，避免双算。", size=9)
-    ws.merge_cells(start_row=verdict_row + 2, start_column=1, end_row=verdict_row + 2, end_column=4)
-    ws.cell(row=verdict_row + 2, column=1).alignment = Alignment(wrap_text=True, vertical="top")
-    ws.row_dimensions[verdict_row + 2].height = 30
+    ws.row_breaks.append(Break(id=20))
+    section(ws, 21, "二、实测标定点（标定依据；本项目的模型预测见『详细表』）", 14)
+    header(ws, 22, ["数据点", "实测字节", "", "来源", "", "", "对应公式", "", "", "", "", "", "", ""])
+    ws.merge_cells("B22:C22"); ws.merge_cells("D22:F22"); ws.merge_cells("G22:N22")
+    for i, (name, meas, src, term) in enumerate(pts):
+        row = 23 + i
+        put(ws, row, 1, name, bold=True)
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=3)
+        put(ws, row, 2, meas, fmt="#,##0", fill=YELLOW)
+        ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=6)
+        put(ws, row, 4, src, size=8)
+        ws.merge_cells(start_row=row, start_column=7, end_row=row, end_column=14)
+        put(ws, row, 7, term, size=8)
+        ws.row_dimensions[row].height = _h((name, 22), (src, 34))
+
+    emp_start = 23 + len(pts) + 2
+    ws.row_breaks.append(Break(id=emp_start - 1))
+    section(ws, emp_start, "三、经验值 / 历史实测基线（说明页『经验值』项的取值）", 14)
+    header(ws, emp_start + 1, ["项", "", "值", "", "来源 / 口径", "", "", "", "", "", "", "", "", ""])
+    ws.merge_cells(start_row=emp_start + 1, start_column=1, end_row=emp_start + 1, end_column=2)
+    ws.merge_cells(start_row=emp_start + 1, start_column=3, end_row=emp_start + 1, end_column=4)
+    ws.merge_cells(start_row=emp_start + 1, start_column=5, end_row=emp_start + 1, end_column=14)
+    for cc in range(6, 15):
+        ws.cell(row=emp_start + 1, column=cc).border = BORDER
+    for cc in (2, 4):
+        ws.cell(row=emp_start + 1, column=cc).border = BORDER
+    emps = [
+        ("kernel（4K-WiFi 基线）", "6,501,171 B", "历史实测基线；vmlinux 段复核 5.81 MiB"),
+        ("modules（4K-WiFi）", "1,782,579 B", "/proc/modules 汇总；用户态 wpa / BT 不在内"),
+        ("CMA 总量", "4,194,304 / 6,291,456 B", "4K-WiFi 4MB / 4K-4G 6MB；CONFIG_CMA_SIZE_MBYTES / init.sh"),
+        ("slab（SUnreclaim）", "4,071,424 B", "4K 样机 实测 3,976KB；SReclaimable 不计"),
+        ("c_mi_ipc 基础 anon", "2,097,152 B", "4K-WiFi smaps 残差确认 1.99 MiB"),
+        ("other_procs", "3,565,158 B", "init / log / adbd / storage 实测"),
+        ("file cache", "8,283,750 B", "/proc/meminfo 实测；可回收，硬占用中扣除"),
+        ("zram", "5,242,880 B", "zsmalloc 压缩后实测；按压力上界计入"),
+        ("WiFi supplicant", "2,076 KB", "4K 样机：wpa 1,608 + udhcpc 468（最大场景）"),
+        ("4G supplicant", "512 KB", "默认经验值"),
+        ("蓝牙 miio_bt", "868 KB", "4K 样机 实测 840–868KB"),
+        ("P2P 单客户端", "1,028 KB 视频 + 128 KB 音频", "4K 样机 实测匿名映射；块数为经验值"),
+        ("NPU 池", "3,584 / 5,120 KB", "4K 系列 3.5MB；双摄-1440p 系列 5MB（init.sh cma_pool_size）"),
+        ("算法模型（常电人/车）", "1,229 KB", "4K-WiFi 实测；双摄-1440p 系列已含池内，勿重复计"),
+        ("MTP 默认（3 会话）", "769,280 B", "KCP 窗口公式估算，未 A/B 隔离"),
+        ("海外语控 SDK", "1,024 KB / 会话", "KVS 源码常量推导，未实机重标"),
+    ]
+    for i, (name, val, src) in enumerate(emps):
+        row = emp_start + 2 + i
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=2)
+        put(ws, row, 1, name, bold=True)
+        ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=4)
+        put(ws, row, 3, val, align="center")
+        ws.merge_cells(start_row=row, start_column=5, end_row=row, end_column=14)
+        put(ws, row, 5, src, size=8)
+        ws.row_dimensions[row].height = _h((name, 22), (val, 22), (src, 70))
+
+    cmd_start = emp_start + len(emps) + 3
+    section(ws, cmd_start, "四、实机采集命令（新构建 / 新项目重标时用）", 14)
+    cmds = [
+        "① 确认 rmem：cat /proc/cmdline",
+        "② 媒体拓扑：impdbg --fs_info / --enc_info（enc_info 第二个 GROUP 在 25 行之后）",
+        "③ rmem 明细：cat /tmp/continuous_mem_info（SDK continuous_alloc dump）",
+        "④ Linux：cat /proc/meminfo ; cat /proc/buddyinfo",
+        "⑤ app：P=$(ps | awk '/[c]_mi_ipc/{print $1; exit}'); awk '/^Rss:/{R+=$2}/^Anonymous:/{A+=$2}/^Swap:/{W+=$2} END{printf \"RSS=%d anon=%d file=%d swap=%d kB\\n\",R,A,R-A,W}' /proc/$P/smaps",
+        "⑥ 写 SD 卡再取，不要写 /tmp；串口不要 cat 大文件。",
+    ]
+    for i, s in enumerate(cmds):
+        row = cmd_start + 1 + i
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=14)
+        put(ws, row, 1, s, size=9)
+        for cc in range(2, 15):
+            ws.cell(row=row, column=cc).border = BORDER
+        ws.row_dimensions[row].height = 24
 
     for name in wb.sheetnames:
         s = wb[name]
@@ -1095,9 +1294,9 @@ def build_workbook(spec, result, out_path):
         s.print_options.horizontalCentered = True
         s.page_margins.left = s.page_margins.right = 0.3
         s.page_margins.top = s.page_margins.bottom = 0.4
-    wb["输入参数"].freeze_panes = "A6"
-    wb["内存估算"].freeze_panes = "A5"
-    wb["标定校验"].freeze_panes = "A6"
+    wb["详细表"].freeze_panes = "A5"
+    wb["详细表"].print_title_rows = "4:4"
+    wb["汇总"].freeze_panes = "A5"
     wb["速查表"].freeze_panes = "A5"
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
@@ -1105,9 +1304,12 @@ def build_workbook(spec, result, out_path):
     raw = os.path.join(tmpdir, os.path.basename(out_path))
     wb.save(raw)
     return raw, tmpdir, {
-        "rmem_total": f"'内存估算'!C{rmem_subtotal}",
-        "linux_dyn": f"'内存估算'!C{linux_subtotal}",
-        "fixed": f"'内存估算'!C{fixed_subtotal}",
+        "rmem": f"D{rmem_sub}",
+        "linux_system": f"D{os_sub}",
+        "linux_apps": f"D{app_sub}",
+        "algorithm": f"D{algo_sub}",
+        "other": f"D{other_sub}",
+        "total": f"D{grand}",
     }
 
 
@@ -1133,12 +1335,17 @@ def recalc(raw, out_path):
 
 def verify(out_path, result, layout):
     wb = load_workbook(out_path, data_only=True)
+    tp = result["system"]["top"]
     checks = {
-        "rmem": (wb["内存估算"]["C" + layout["rmem_total"].split("C")[-1]].value, result["rmem"]["total"]),
-        "linux_dyn": (wb["内存估算"]["C" + layout["linux_dyn"].split("C")[-1]].value, result["linux"]["dynamic"] + result["system"]["network"] + result["system"].get("bluetooth", 0)),
-        "fixed": (wb["内存估算"]["C" + layout["fixed"].split("C")[-1]].value, result["linux"]["fixed"]),
+        "rmem": (layout["rmem"], result["rmem"]["total"]),
+        "linux_system": (layout["linux_system"], tp["linux_system"]),
+        "linux_apps": (layout["linux_apps"], tp["linux_apps"]),
+        "algorithm": (layout["algorithm"], tp["algorithm"]),
+        "other": (layout["other"], tp["other"]),
+        "total": (layout["total"], tp["total"]),
     }
-    for name, (got, want) in checks.items():
+    for name, (ref, want) in checks.items():
+        got = wb["详细表"][ref].value
         if got is None:
             raise SystemExit(f"校验失败：{name} 未算出缓存值（LibreOffice 重算异常）")
         if abs(float(got) - float(want)) > max(1.0, abs(want) * 0.005):
@@ -1151,11 +1358,23 @@ def summary_text(r):
     v = r["verdict"]
     rmem, linux = r["rmem"], r["linux"]
     mdns = " | ".join(f"S{s} {m(val):.2f}" for s, val in rmem["mdns_by_sensor"].items())
+    if rmem.get("measured"):
+        groups = OrderedDict()
+        for blk in rmem.get("blocks", []):
+            k = blk.get("group") or "其他"
+            groups[k] = groups.get(k, 0.0) + float(blk.get("bytes", 0))
+        detail = " | ".join(f"{k} {m(v):.2f}" for k, v in groups.items())
+        algo_in_media = sum(v for k, v in groups.items() if k == "算法")
+        rmem_line = (f"rmem : 媒体堆 used {m(rmem['total'] + algo_in_media):.2f} MB / cap "
+                     f"{m(rmem['cap']):.2f} MB（{rmem['usage'] * 100:.1f}%）| {detail} "
+                     f"| 计入 RMEM {m(rmem['total']):.2f} MB")
+    else:
+        rmem_line = (f"rmem : MDNS {mdns} | FS VB {m(rmem['fs_vb']):.2f} | "
+                     f"VENC {m(sum(x['bytes'] for x in rmem['venc'])):.2f} | SDK {m(rmem['sdk_reserved']):.2f} "
+                     f"= {m(rmem['total']):.2f} MB")
     lines = [
         f"项目: {r['project']} ({r['platform']})    rmem 需求: {m(rmem['need']):.2f} MB",
-        f"rmem : MDNS {mdns} | FS VB {m(rmem['fs_vb']):.2f} | "
-        f"VENC {m(sum(x['bytes'] for x in rmem['venc'])):.2f} | SDK {m(rmem['sdk_reserved']):.2f} "
-        f"= {m(rmem['total']):.2f} MB",
+        rmem_line,
         f"Linux: ring {m(linux['rings']):.2f} | audio {m(linux['audio_ring']):.2f} | "
         f"P2P {m(linux['p2p']):.2f} | MTP {m(linux.get('mtp', 0)):.2f} | "
         f"海外语控 {m(linux.get('webrtc', 0)):.2f} | 固定 {m(linux['fixed']):.2f} | "
@@ -1180,14 +1399,12 @@ def summary_text(r):
             f" = {m(tp.get('total', 0)):.2f} MB"
         )
         lines.append(
-            f"系统 : DRAM {m(sy['dram']):.0f} | rmem {m(sy['rmem_need']):.2f}"
+            f"系统 : DRAM {m(sy['dram']):.0f} | rmem {m(sy.get('media_cap') or sy['rmem_need']):.2f}"
             f" | Linux {m(sy['linux_total']):.2f}/{m(sy['linux_visible']):.2f}"
             f" | NPU+算法 {m(sy['npu_algo']):.2f}{'(含CMA)' if sy['inside_cma'] else ''}"
         )
         lines.append(f"预留 : 账面占用 {m(sy['system_used']):.2f} MB，账面预留 {m(sy['final_reserve']):.2f} MB"
                      f" ; 硬占用 {m(sy.get('hard_total', sy['system_used'])):.2f} MB，硬余量 {m(sy.get('hard_reserve', sy['final_reserve'])):.2f} MB")
-        if sy.get("bootargs_rmem"):
-            lines.append(f"bootargs rmem {m(sy['bootargs_rmem']):.2f} MB ⇒ 运行时余量 {m(sy['runtime_reserve']):.2f} MB")
     if r.get("warnings"):
         lines.append("注意 : " + "；".join(r["warnings"]))
     return "\n".join(lines)
@@ -1230,25 +1447,36 @@ def self_test():
                 {"enabled": True, "sensor": 1, "name": "enc3", "type": "H265", "w": 2880, "h": 1620, "bitrate": 1800, "ring": True},
             ],
         })
-        # <项目B> 实测精度验收：rmem / MIKE SDK / miio_client 偏差 ≤1MB
-        hm_path = os.path.join(HERE, "..", "templates", "spec-4k-4g.json")
+        # 4K-4G 实测精度验收：rmem / MIKE SDK / miio_client 偏差 ≤1MB
+        hm_path = os.path.join(HERE, "..", "templates", "spec-4k-4g-mtp.json")
         if os.path.exists(hm_path):
             with open(hm_path, encoding="utf-8") as fh:
                 hm = merge(DEFAULTS, json.load(fh))
             hr = compute(hm)
-            assert abs(hr["rmem"]["total"] - 24200960) < MIB, "<项目B> rmem 偏差 >1MB"
+            assert abs(hr["rmem"]["total"] - 24200960) < MIB, "4K-4G rmem 偏差 >1MB"
             mike_anon = hr["linux"]["dynamic"] + float(hm["fixed"].get("app_base", 0))
-            assert abs(mike_anon / 1024.0 - 6652) < 1024, "<项目B> MIKE SDK 偏差 >1MB"
+            assert abs(mike_anon / 1024.0 - 6652) < 1024, "4K-4G MIKE SDK 偏差 >1MB"
             assert abs(hr["system"]["apps"]["miio_total"] - 1708032) < MIB, "miio_client 偏差 >1MB"
 
-        # <项目C> 实测：五项合计/最终预留偏差 ≤1MB
-        h6_path = os.path.join(HERE, "..", "templates", "spec-dual-wifi.json")
+        # 双摄-1440p-WiFi 实测：五项合计/最终预留偏差 ≤1MB
+        h6_path = os.path.join(HERE, "..", "templates", "spec-dual-1440p-wifi.json")
         if os.path.exists(h6_path):
             with open(h6_path, encoding="utf-8") as fh:
                 h6 = merge(DEFAULTS, json.load(fh))
             r6 = compute(h6)["system"]["top"]
-            assert abs(r6["total"] - (117077760 + h6["fixed"].get("slab", 0))) < MIB, "<项目C> 五项合计偏差 >1MB"
-            assert abs(r6["final_reserve"] - (17139968 - h6["fixed"].get("slab", 0))) < MIB, "<项目C> 最终预留偏差 >1MB"
+            assert abs(r6["total"] - (117077760 + h6["fixed"].get("slab", 0))) < MIB, "双摄-1440p-WiFi 五项合计偏差 >1MB"
+            assert abs(r6["final_reserve"] - (17139968 - h6["fixed"].get("slab", 0))) < MIB, "双摄-1440p-WiFi 最终预留偏差 >1MB"
+
+        # SigmaStar：媒体按实测块计，算法块从 RMEM 划出，Linux 可见按 cap
+        ss_path = os.path.join(HERE, "..", "templates", "spec-sigmastar-256mb.json")
+        if os.path.exists(ss_path):
+            with open(ss_path, encoding="utf-8") as fh:
+                ss = merge(DEFAULTS, json.load(fh))
+            sr = compute(ss)
+            assert abs(sr["rmem"]["total"] - 115317824) < 1, "SigmaStar RMEM 块合计异常"
+            assert abs(sr["system"]["top"]["algorithm"] - 5874048) < 1, "SigmaStar 算法块未从媒体堆划出"
+            assert abs(sr["linux"]["visible"] - (256 * MIB - 141557760)) < 1, "SigmaStar Linux 可见未按 cap 计算"
+            assert sr["system"]["top"]["rmem"] + sr["system"]["top"]["algorithm"] <= sr["rmem"]["cap"], "媒体块超 cap"
 
         dr = compute(dual)
         assert len(dr["rmem"]["mdns_by_sensor"]) == 2, "双摄 MDNS 未按 sensor 分组"

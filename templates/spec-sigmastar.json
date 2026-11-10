@@ -1,0 +1,61 @@
+{
+  "_notes": [
+    "SigmaStar 平台骨架（SSC/SSD 303 等）。媒体内存走 media.source=measured：按 /proc/mi_modules/mi_sys_mma/mma_heap_name0 的 used 条目填 blocks。",
+    "blocks[].group 决定归属：『算法』划到算法块（不再计入 RMEM），其余（VENC / FS VB / SCL / ISP / SYS / RGN / AI 音频…）计入 RMEM。",
+    "cap_bytes 取 bootargs mma_heap=...,sz=（carve-out 上限）；Linux 可见 = DRAM − cap，与 used 多少无关。",
+    "frame_sources / encoders 留空：SigmaStar 不按分辨率推 pool；若确实要按君正公式盲测，删掉 media.source=measured 并填 FS/ENC。",
+    "network.type 用 none 表示 Linux 侧无网络栈（Cat.1/4G 在对端 RTOS，例如 EC718）；有 WiFi 机型按 wifi 填。",
+    "app_base 填目标应用（mi_ipc / c_mi_ipc）的 smaps Anonymous；未拆分 ring/P2P 时把 p2p、audio 置 0，避免双算。",
+    "下面 blocks 的数值是 SigmaStar-256MB 2026-11-10 直播态实测示例，换设备必须重采。"
+  ],
+  "project": "sigmastar-new",
+  "platform": "SigmaStar",
+  "platform_family": "sigmastar",
+  "network": {
+    "type": "none",
+    "wifi_supplicant_kb": 0,
+    "lte_supplicant_kb": 0,
+    "lte_module_kb": 0
+  },
+  "media": {
+    "source": "measured",
+    "cap_bytes": 0,
+    "blocks": [
+      {"name": "VENC 编码器", "group": "VENC", "bytes": 0, "note": "ven_* 任务归组"},
+      {"name": "FS 帧源 VB", "group": "FS VB", "bytes": 0, "note": "vif_* 任务归组"},
+      {"name": "SCL 缩放", "group": "SCL", "bytes": 0, "note": "scl_* 任务归组"},
+      {"name": "ISP + 3DNR", "group": "ISP", "bytes": 0, "note": "isp_* / dnr_* 任务归组"},
+      {"name": "mi_sys 公共", "group": "SYS", "bytes": 0, "note": "CMDMEM / codec 堆 / cmdq"},
+      {"name": "RGN / OSD", "group": "RGN", "bytes": 0, "note": "rgn_*"},
+      {"name": "IPU 推理（算法）", "group": "算法", "bytes": 0, "note": "ipu_* → 算法块，不重复计"}
+    ]
+  },
+  "dram_mb": 256,
+  "buffer_seconds": 6,
+  "p2p": {"clients": 0, "video_kb": 0, "video_bufs": 0, "audio_kb": 0, "audio_bufs": 0},
+  "audio": {"bitrate": 0, "channels": 1},
+  "ivdc_mem_line": 0,
+  "sdk_reserved": 0,
+  "fixed": {
+    "kernel": 0,
+    "modules": 0,
+    "cma": 0,
+    "slab": 0,
+    "app_base": 0,
+    "miio_client": 0,
+    "miio_ot": 0,
+    "other_procs": 0,
+    "file_cache": 0,
+    "zram": 0
+  },
+  "features": {
+    "mtp": {"enabled": false},
+    "webrtc": {"enabled": false},
+    "bluetooth": {"enabled": false},
+    "npu_algo": {"npu_pool_kb": 0, "algo_model_kb": 0, "inside_cma": false},
+    "slack": {"extra_threads": 0, "thread_stack_kb": 64}
+  },
+  "frame_sources": [],
+  "encoders": [],
+  "calibrated": false
+}

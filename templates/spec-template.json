@@ -1,16 +1,16 @@
 {
   "_notes": [
     "海外语控 SDK 统称 WebRTC / Alexa / Google：用 features.webrtc 的 sessions/fixed/per_session 统一计；不再单列 voice_assistant",
-    "双摄/多摄：每项 frame_sources / encoders 加 sensor 字段（0/1/…）；<项目C> 直接用 templates/spec-dual-wifi.json",
+    "双摄/多摄：每项 frame_sources / encoders 加 sensor 字段（0/1/…）；双摄-1440p-WiFi 直接用 templates/spec-dual-1440p-wifi.json",
     "enabled / ivdc / ring 用 true/false；type 用 H265 / H264 / JPEG（JPEG 精确匹配才会走 JPEG 公式）",
     "w/h 单位像素；bitrate(VENC) 与 ring_bitrate(SDK ring) 单位 kbps，ring_bitrate 省略时=bitrate；fixed / sdk_reserved 单位字节",
     "JPEG 抓拍若按需建拆，enabled=false（稳态不计，瞬时约 +0.6MB）",
     "frame_sources / encoders 数量不设上限（Excel 按 spec 动态生成行）",
-    "fixed 可整体省略，默认取 <项目A> 实测基线；换项目建议实测后覆盖",
+    "fixed 可整体省略，默认取 4K-WiFi 实测基线；换项目建议实测后覆盖",
     "算法模型的 algo_model_kb 不用公式推：查 references/algo-models.md 登记表带入（常电人/车算法 1229KB）",
-    "WiFi 机型必须填 wifi_supplicant_kb：实测 wpa 1,608KB + udhcpc 468KB = 2,076KB（<参考机> 2026-11-09）；蓝牙开则 features.bluetooth.userspace_kb=868（miio_bt）"
+    "WiFi 机型必须填 wifi_supplicant_kb：实测 wpa 1,608KB + udhcpc 468KB = 2,076KB（4K 样机 2026-11-09）；蓝牙开则 features.bluetooth.userspace_kb=868（miio_bt）"
   ],
-  "project": "<项目A>",
+  "project": "4k-wifi",
   "platform": "T32Pro",
   "network": {
     "type": "wifi",
@@ -19,7 +19,6 @@
     "lte_module_kb": 0
   },
   "dram_mb": 64,
-  "rmem_bootargs_mb": 23.5,
   "buffer_seconds": 6,
   "p2p": {
     "clients": 2,

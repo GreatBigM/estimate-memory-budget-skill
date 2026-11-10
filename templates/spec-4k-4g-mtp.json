@@ -1,14 +1,14 @@
 {
   "_notes": [
     "加 slab 行后五项 68.78（旧 62.02 为加 slab 前）；旧校准与实测 MemFree 的吻合可能已吸收 slab，需 A/B 后填 0 或实测值",
-    "<项目B> = <项目A> 的 4G 款；单摄 4K + 4G supplicant；64MB DDR / rmem 23.5MB",
+    "4K-4G = 4K-WiFi 的 4G 款；单摄 4K + 4G supplicant；64MB DDR / rmem 23.5MB",
     "系数已用 2026-11-09 实机 continuous_mem_info 重标：k_isp=0.7582, k_recon=0.5875, k_stream=6.9780",
     "实测 rmem 24,200,960 B / cap 24,641,536 B；JPEG 管线开机创建（609,536 B）",
     "VENC 码率用 IMP target_bitrate=1500/350；SDK ring 用 MIKE_STREAM_*_BRATE=1800/400，已分列",
     "MTP：小米 KCP MTP SDK；默认 3 会话 769,280 B，有实测填 measured_bytes",
     "若 JPEG 改为按需建拆，enc2 enabled 改 false，rmem 减约 0.58 MiB"
   ],
-  "project": "<项目B>",
+  "project": "4k-4g",
   "platform": "T32Pro",
   "network": {
     "type": "wifi+4g",
@@ -17,7 +17,6 @@
     "lte_module_kb": 0
   },
   "dram_mb": 64,
-  "rmem_bootargs_mb": 23.5,
   "buffer_seconds": 9,
   "p2p": {
     "clients": 2,

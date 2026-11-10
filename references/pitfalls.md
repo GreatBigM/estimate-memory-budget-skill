@@ -36,7 +36,7 @@ fps 与 GOP 影响 CPU、码流波动与 IDR 间隔，不改变 pool/ring 的分
 
 `max_video_send_size` 是「发送视频的大小」；SDK 内部每客户端分配几块、音频是否双向各一块，
 文档未给。默认视频 1 块、音频发送+接收各 1 块；误差可达 ±30%，重要项目用 smaps 实测。
-2026-11-09 <参考机> 拉流实测补强：c_mi_ipc smaps 出现 **1,028KB 匿名映射、RSS 全驻留**，与
+2026-11-09 4K 样机 拉流实测补强：c_mi_ipc smaps 出现 **1,028KB 匿名映射、RSS 全驻留**，与
 `video_kb=1024 × 1 块`吻合；音频 32KB 块太小未单独识别。**并发按单 client 线性叠加**（每个 client
 独立分配，不共享缓冲）：每多一个 client 加 1,028KB 视频 + 128KB 音频，2 clients ≈ 2.3MB、3 clients ≈ 3.5MB，
 不必再单独测多客户端。
@@ -70,42 +70,42 @@ file cache 与 zram 可回收/可压缩；预算判定看趋势与余量，不�
 
 ## 12. H264 与 JPEG 的变体开关
 
-- <项目C> 只有海外版 B01 开 H264（`VIDEO_H264_IS_OPEN`）；国内版 enc2/enc5 填 `enabled=false`。
-- <项目C> 双摄 `video_hal_init` 会开机创建 enc6/enc7 两路 JPEG；如果项目已改成按需建拆，才填 `enabled=false`。
+- 双摄-1440p-WiFi 只有海外版 H264+WebRTC 版 开 H264（`VIDEO_H264_IS_OPEN`）；国内版 enc2/enc5 填 `enabled=false`。
+- 双摄-1440p-WiFi 双摄 `video_hal_init` 会开机创建 enc6/enc7 两路 JPEG；如果项目已改成按需建拆，才填 `enabled=false`。
 - 海思/君正不同 SDK 的 JPEG 生命周期可能不同，先看 `jpeg_snap_setup` 是开机调用还是按需调用。
 
-## 13. <项目C> 的内存参数别抄 <项目A>
+## 13. 双摄-1440p-WiFi 的内存参数别抄 4K-WiFi
 
-- DDR 128MB；`CONFIG_<项目C>` 分支 bootargs 是 `mem=85M rmem=43M`，B01 是 `mem=86M rmem=42M`。
+- DDR 128MB；`CONFIG_双摄-1440p-WiFi` 分支 bootargs 是 `mem=85M rmem=43M`，H264+WebRTC 版 是 `mem=86M rmem=42M`。
 - `init.sh`：`isp_memopt=8`、`direct_mode=2`、`ivdc_mem_line=810`、`ivdc_mem_stride=2880`。
-- CMA 8MB（<项目A> 是 4MB）；固定项要按 <项目C> 覆盖，不能沿用 <项目A> 的 30.2MB 基线。
-- `isp_memopt` 与 <项目A> 的 `0x7` 不同，k_isp 的缩放关系未标定；41.94MiB 只是量级参考。
+- CMA 8MB（4K-WiFi 是 4MB）；固定项要按 双摄-1440p-WiFi 覆盖，不能沿用 4K-WiFi 的 30.2MB 基线。
+- `isp_memopt` 与 4K-WiFi 的 `0x7` 不同，k_isp 的缩放关系未标定；41.94MiB 只是量级参考。
 
-## 14. 平台判据用 <PRJxxx>，不是目录名
+## 14. 平台判据用 PRJ0xx，不是目录名
 
-- 判据：`drivers/<DRIVER_DIRECTORY_NAME>/isp/tx-isp-<PRJxxx>/` + `sensors/*_<PRJxxx>.ko`。目录名由 `toolchain/*_cfg.cmake` 指定；<项目D>/<项目C>/<项目B> 实际是 `t32_t33_3_10_14` / `t32_t33`，不是 `t32pro_5_15_170`。
+- 判据：`drivers/<DRIVER_DIRECTORY_NAME>/isp/tx-isp-PRJ0xx/` + `sensors/*_PRJ0xx.ko`。目录名由 `toolchain/*_cfg.cmake` 指定；双摄-1440p-4G/双摄-1440p-WiFi/4K-4G 实际是 `t32_t33_3_10_14` / `t32_t33`，不是 `t32pro_5_15_170`。
 - 本技能的 k_isp / k_recon / k_stream 只对 **T32Pro** 的 ISP/VENC 行为标定；换 T31/T33 或其它厂商平台必须重采。
-- 同一 T32Pro 平台的不同项目（<项目A>/<项目C>）可复用比例系数，但 `isp_memopt`、rmem 边界、CMA 大小要按项目覆盖。
+- 同一 T32Pro 平台的不同项目（4K-WiFi/双摄-1440p-WiFi）可复用比例系数，但 `isp_memopt`、rmem 边界、CMA 大小要按项目覆盖。
 
 ## 15. MTP 是小米 KCP MTP，不是 USB MTP
 
 - 符号在 `libmike.a`（`mtp_entry.c.o`、`mtp_*`），基于 KCP；不是 USB Media Transfer Protocol。
 - 默认公式只含：固定 128KB + 会话 × ((128+32)×920 + 64KB/会话) = 3 会话 769,280 B。
 - 实际开销还可能有加密、MBuffer、线程栈；有实测就填 `features.mtp.measured_bytes`，优先级高于公式。
-- <项目B> 支持 MTP；<项目A>/<项目C> 默认不启用，别把 <项目B> 的 MTP 账带到它们身上。
+- 4K-4G 支持 MTP；4K-WiFi/双摄-1440p-WiFi 默认不启用，别把 4K-4G 的 MTP 账带到它们身上。
 
 ## 16. VENC 码率 ≠ SDK ring 码率
 
-<项目B> 实测：IMP `TARGET_BITRATE_MAIN=1500`、`SUB=350`，而 SDK `MIKE_STREAM_MAIN_BRATE=1800`、`SUB_BRATE=400`。
+4K-4G 实测：IMP `TARGET_BITRATE_MAIN=1500`、`SUB=350`，而 SDK `MIKE_STREAM_MAIN_BRATE=1800`、`SUB_BRATE=400`。
 VENC pool 用前者，ring 用后者；模型已分 `bitrate` / `ring_bitrate` 两列。混用会把 ring 少算约 20%。
 
-## 17. <项目C-B01> 的 H264 与 WebRTC 是两笔额外账
+## 17. 双摄-1440p-H264-WebRTC 的 H264 与 WebRTC 是两笔额外账
 
-- `VIDEO_H264_IS_OPEN=1` 只在 B01 海外版；国内版 enc2/enc5 不创建，别把 B01 的 H264 账带到国内版。
+- `VIDEO_H264_IS_OPEN=1` 只在 H264+WebRTC 版 海外版；国内版 enc2/enc5 不创建，别把 H264+WebRTC 版 的 H264 账带到国内版。
 - H264 **没有 RFC**：不能直接套 H265 的 `k_recon=0.5875`；用 `h264_factor=1.22` 在 H265 模型上修正，换分辨率/码率要重算。
-- B01 默认只多 **1 路** 480P H264（S0 enc2）；不要默认把双 sensor 的 enc5 也算上，需要时再开。H264 pool 常驻，SDK ring/WebRTC 按需。
-- WebRTC 是 KVS WebRTC/HWYK（`<项目C-B01>_target/libmike.a`），不是 USB/浏览器；默认 1.5MB/会话是经验值，必须用 smaps 或会话日志实测。
-- B01 rmem=42MB（国内 43MB）；当前模型（单路 H264）估 42.86MB，超 0.86MB，必须上机 `continuous_mem_info` 复核后再定论。
+- H264+WebRTC 版 默认只多 **1 路** 480P H264（S0 enc2）；不要默认把双 sensor 的 enc5 也算上，需要时再开。H264 pool 常驻，SDK ring/WebRTC 按需。
+- WebRTC 是 KVS WebRTC/HWYK（`dual-1440p-wifib01_target/libmike.a`），不是 USB/浏览器；默认 1.5MB/会话是经验值，必须用 smaps 或会话日志实测。
+- H264+WebRTC 版 rmem=42MB（国内 43MB）；当前模型（单路 H264）估 42.86MB，超 0.86MB，必须上机 `continuous_mem_info` 复核后再定论。
 
 ## 18. 通用口径：NPU/算法、4G、海外语控
 
@@ -155,8 +155,8 @@ NOR / NAND、SD 卡、NAS 都可以问，但只作为备注与 fixed 基线口�
 
 算法模型的工作内存取决于模型结构、张量布局与运行时缓冲，无法从分辨率/码率推出。
 一律查 `references/algo-models.md`，选中即带入；表里没有的，让用户给 KB 并追加登记行。
-`algo.img` 的文件大小（<项目A> 约 860KB）只是 flash 存储占用，不能当工作内存用。
-NPU 池是另一笔：<项目A> 3.5MB 被动态缓冲吃干，评估时不要因为“池没满”就缩。
+`algo.img` 的文件大小（4K-WiFi 约 860KB）只是 flash 存储占用，不能当工作内存用。
+NPU 池是另一笔：4K-WiFi 3.5MB 被动态缓冲吃干，评估时不要因为“池没满”就缩。
 
 ## 26. 按最大场景算，不按稳态
 
@@ -169,7 +169,7 @@ P2P 满客户端、缓存秒数取最大、JPEG 抓拍瞬时、SD 录像/上行�
 ## 27. 码率不改 rmem，只改 SDK ring
 
 `continuous_mem_info` 里的 VENC pool 由分辨率、编码流数、编码器配置决定，**与码率无关**：
-<参考机> 4K/1500 与 <项目B> 4K/1500 的 pool 逐字节相同，即换了产品、只要分辨率和流数一致就不变；
+4K 样机 4K/1500 与 4K-4G 4K/1500 的 pool 逐字节相同，即换了产品、只要分辨率和流数一致就不变；
 把目标码率从 1500 改到 2000，rmem 不变。
 码率只影响 Linux 侧 `R = bitrate × 128 × 缓存秒数`（libmike.a 反汇编坐实）。
 向导里仍问码率，是为了算 ring，不是为了算 rmem；不要再写「码率调高 → VENC pool 变大」。
